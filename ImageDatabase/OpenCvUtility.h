@@ -3,11 +3,14 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <unordered_set>
 
-#include <opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
 
 namespace OpenCvUtility
 {
+	bool IsImage(const std::string& extension);
+
 	std::optional<std::string> ReadToEnd(const std::filesystem::path& path);
 
 	cv::Mat ReadImage(const std::filesystem::path& file);

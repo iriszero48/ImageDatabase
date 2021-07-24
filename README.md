@@ -3,9 +3,11 @@
 
 ## 依赖
 + eigen3
-+ opencv4[core,dnn,eigen,ffmpeg,jpeg,png,quirc,tiff,webp]
-+ libzip[bzip2,core]
++ opencv4[dnn,eigen,jpeg,png,quirc,tiff,webp]
++ ffmpeg[avcodec,avformat,swscale]
++ libzip
 + boost-context
++ (Linux/Mac) tbb
 
 ## 构建
 + CMake/VisualStudio

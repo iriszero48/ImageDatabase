@@ -6,12 +6,18 @@
 #include <optional>
 #include <thread>
 #include <string>
-#include <coroutine>
-#include <future>
 
-#include <opencv2/opencv.hpp>
 #include <zip.h>
 #include <boost/context/continuation.hpp>
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
+}
 
 #include "Arguments.h"
 #include "Convert.h"
@@ -20,6 +26,7 @@
 #include "StdIO.h"
 #include "Thread.h"
 #include "Log.h"
+#include "Algorithm.h"
 
 ArgumentOption(Operator, build, query)
 
@@ -70,14 +77,6 @@ int main(int argc, char* argv[])
 	args.Add(logFileArg);
 
 	std::thread logThread;
-	
-	cv::redirectError([](int status, const char* func_name, const char* err_msg,
-		const char* file_name, int line, void*)
-	{
-		Log.Write<LogLevel::Error>(L"[OpenCV] " + std::filesystem::path(err_msg).wstring());
-		return 0;
-	});
-	
 #ifdef CatchEx
 	try
 #endif
@@ -86,6 +85,50 @@ int main(int argc, char* argv[])
 
 		logThread = std::thread([](const LogLevel& level, std::filesystem::path logFile)
 		{
+			cv::redirectError([](int status, const char* func_name, const char* err_msg,
+				const char* file_name, int line, void*)
+			{
+				Log.Write<LogLevel::Error>(
+					L"[" +
+						*Convert::ToWString(file_name) + L":" +
+						*Convert::ToWString(func_name) + L":" +
+						*Convert::ToWString(line) +
+					L"] " + 
+					L"status: " + *Convert::ToWString(status) +L": " +
+					*Convert::ToWString(err_msg)
+				);
+				return 0;
+			});
+
+			av_log_set_level([&]()
+			{
+				switch (level)
+				{
+				case LogLevel::None:
+					return AV_LOG_QUIET;
+				case LogLevel::Error:
+					return AV_LOG_ERROR;
+				case LogLevel::Warn:
+					return AV_LOG_WARNING;
+				case LogLevel::Debug:
+					return AV_LOG_VERBOSE;
+				default:
+					return AV_LOG_INFO;
+				}
+			}());
+			av_log_set_callback([](void* avcl, int fflevel, const char* fmt, va_list vl)
+			{
+				static char buf[4096]{ 0 };
+				int ret = 1;
+				av_log_format_line2(avcl, fflevel, fmt, vl, buf, 4096, &ret);
+				auto data = *Convert::ToWString((char*)buf);
+				data.erase(data.find_last_of(L'\n'));
+				if (fflevel <= 16) Log.Write<LogLevel::Error>(data);
+				else if (fflevel <= 24) Log.Write<LogLevel::Warn>(data);
+				else if (fflevel <= 32) Log.Write<LogLevel::Log>(data);
+				else Log.Write<LogLevel::Debug>(data);
+			});
+
 			Log.level = level;
 			std::ofstream fs;
 			if (!logFile.empty())
@@ -141,7 +184,34 @@ int main(int argc, char* argv[])
 					ImageDatabase db(dbPath);
 
 					ImageDatabase::Image img;
-				
+
+					Log.Write<LogLevel::Debug>([]()
+					{
+						static void* iterate_data = NULL;
+						const auto Encoder_GetNextCodecName = []()->std::string
+						{
+							auto current_codec = av_codec_iterate(&iterate_data);
+							while (current_codec != NULL)
+							{
+								if (!av_codec_is_decoder(current_codec) && current_codec->type == AVMEDIA_TYPE_VIDEO)
+								{
+									current_codec = av_codec_iterate(&iterate_data);
+									continue;
+								}
+								return current_codec->name;
+							}
+							return "";
+						};
+						std::wstring buf;
+						auto dt = Encoder_GetNextCodecName();
+						while (!dt.empty())
+						{
+							buf.append(*Convert::ToWString(dt.c_str()) + L" ");
+							dt = Encoder_GetNextCodecName();
+						}
+						return buf;
+					}());
+
 					boost::context::continuation source = boost::context::callcc(
 						[&](boost::context::continuation&& sink)
 						{
@@ -150,6 +220,7 @@ int main(int argc, char* argv[])
 								if (file.is_regular_file())
 								{
 									const auto filePath = file.path();
+									Log.Write<LogLevel::Log>(L"Scan file: " + filePath.wstring());
 									if (filePath.extension() == ".zip")
 									{
 										const auto zipFile = *OpenCvUtility::ReadToEnd(file.path());
@@ -172,7 +243,7 @@ int main(int argc, char* argv[])
 										const auto entries = zip_get_num_entries(za, 0);
 										if (entries < 0)
 										{
-											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString(zip_get_error(za)->str));
+											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString((char*)zip_get_error(za)->str));
 											zip_close(za);
 											continue;
 										}
@@ -207,61 +278,156 @@ int main(int argc, char* argv[])
 										}
 										zip_close(za);
 									}
-									else if (filePath.extension() == ".gif")
+									else if (const auto ext = filePath.extension();
+										ext == ".gif" ||
+										ext == ".mp4" ||
+										ext == ".mkv" ||
+										ext == ".flv" ||
+										ext == ".avi" ||
+										ext == ".mpg" ||
+										ext == ".vob" ||
+										ext == ".mov" ||
+										ext == ".wmv" ||
+										ext == ".swf" ||
+										ext == ".3gp" ||
+										ext == ".mts" ||
+										ext == ".rm" ||
+										ext == ".ts" ||
+										ext == ".m2ts" ||
+										ext == ".rmvb" ||
+										ext == ".mpeg")
 									{
-										cv::VideoCapture cap;
-										std::string gifPath;
-										bool copy = false;
+										std::string gifPath = filePath.u8string();
+										int ret;
+
+										AVFormatContext* inctx = nullptr;
+										AVCodec* vcodec = nullptr;
+										AVCodecContext* vcodecCtx = nullptr;
+										AVFrame* frame = nullptr;
+										AVFrame* decframe = nullptr;
+										SwsContext* swsctx = nullptr;
+
 										try
 										{
-											gifPath = file.path().string();
-										}
-										catch (...)
-										{
-											gifPath = String::StringCombineNew("tmp.", String::FromStreamNew(std::this_thread::get_id()), ".gif");
-											try
+											ret = avformat_open_input(&inctx, gifPath.c_str(), nullptr, nullptr);
+											if (ret < 0) throw std::runtime_error("avforamt_open_input fail: " + *Convert::ToString(ret));
+
+											ret = avformat_find_stream_info(inctx, nullptr);
+											if (ret < 0) throw std::runtime_error("avformat_find_stream_info fail: " + *Convert::ToString(ret));
+
+											ret = av_find_best_stream(inctx, AVMEDIA_TYPE_VIDEO, -1, -1, &vcodec, 0);
+											if (ret < 0) throw std::runtime_error("av_find_best_stream fail: " + *Convert::ToString(ret));
+
+											const int vstrm_idx = ret;
+											auto vstrm = inctx->streams[vstrm_idx]->codecpar;
+
+											vcodecCtx = avcodec_alloc_context3(vcodec);
+											if (!vcodecCtx) throw std::runtime_error("avcodec_alloc_context3 fail");
+
+											avcodec_parameters_to_context(vcodecCtx, vstrm);
+											ret = avcodec_open2(vcodecCtx, vcodec, nullptr);
+											if (ret < 0) throw std::runtime_error("avcodec_open2 fail: " + *Convert::ToString(ret));
+
+											const int dst_width = vstrm->width;
+											const int dst_height = vstrm->height;
+											const AVPixelFormat dst_pix_fmt = AV_PIX_FMT_BGR24;
+											if (vcodecCtx->pix_fmt != AV_PIX_FMT_NONE)
 											{
-												copy_file(filePath, gifPath);
-												copy = true;
+												swsctx = sws_getCachedContext(
+													nullptr, vstrm->width, vstrm->height, vcodecCtx->pix_fmt,
+													dst_width, dst_height, dst_pix_fmt, 0, nullptr, nullptr, nullptr);
+												if (!swsctx) throw std::runtime_error("sws_getCachedContext fail");
 											}
-											catch (const std::exception& ex)
+
+											frame = av_frame_alloc();
+											std::string framebuf(av_image_get_buffer_size(dst_pix_fmt, dst_width, dst_height, dst_width), 0);
+											av_image_fill_arrays(
+												frame->data, frame->linesize,
+												(uint8_t*)framebuf.data(),
+												dst_pix_fmt, dst_width, dst_height, dst_width);
+						
+											decframe = av_frame_alloc();
+											bool end_of_stream = false;
+											AVPacket* pkt = av_packet_alloc();
+											do
 											{
-												Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + L": copy_file fail: " + *Convert::ToWString(ex.what()));
-												continue;
-											}
+												if (!end_of_stream)
+												{
+													ret = av_read_frame(inctx, pkt);
+													if (ret < 0 && ret != AVERROR_EOF) throw std::runtime_error("av_read_frame fail: " + *Convert::ToString(ret));
+													
+													if (ret == 0 && pkt->stream_index != vstrm_idx)
+													{
+														av_packet_unref(pkt);
+														continue;
+													}
+													end_of_stream = (ret == AVERROR_EOF);
+												}
+												if (end_of_stream)
+												{
+													av_packet_unref(pkt);
+													ret = 0;
+												}
+												else {ret = avcodec_send_packet(vcodecCtx, pkt);
+												if (ret < 0) throw std::runtime_error("avcodec_send_packet: error sending a packet for decoding: " + *Convert::ToString(ret));
+												}
+												while (ret >= 0)
+												{
+													ret = avcodec_receive_frame(vcodecCtx, decframe);
+													if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+													{
+														av_packet_unref(pkt);
+														break;
+													}
+													else if (ret < 0) throw std::runtime_error("avcodec_receive_frame: error during decoding: " + *Convert::ToString(ret));
+											
+													if (swsctx == nullptr)
+													{
+														swsctx = sws_getCachedContext(
+															nullptr, vstrm->width, vstrm->height, vcodecCtx->pix_fmt,
+															dst_width, dst_height, dst_pix_fmt, 0, nullptr, nullptr, nullptr);
+														if (!swsctx) throw std::runtime_error("sws_getCachedContext fail");
+													}
+							
+													sws_scale(swsctx, decframe->data, decframe->linesize, 0, decframe->height, frame->data, frame->linesize);
+
+													cv::Mat image(dst_height, dst_width, CV_8UC3, (uint8_t*)framebuf.data(), frame->linesize[0]);
+													//cv::imshow("", image);
+													//cv::waitKey(0);
+													std::vector<uchar> rawData;
+													imencode(".bmp", image, rawData);
+													std::string dataStr;
+													std::copy_n(rawData.begin(), rawData.size(), std::back_inserter(dataStr));
+													rawData.clear();
+													rawData.shrink_to_fit();
+													const auto subPath = filePath / *Convert::ToString(vcodecCtx->frame_number);
+													Log.Write<LogLevel::Info>(L"load file: " + subPath.wstring());
+													img = ImageDatabase::Image(subPath, dataStr);
+													sink = sink.resume();
+												}
+												av_packet_unref(pkt);
+											} while (!end_of_stream);
+											av_packet_free(&pkt);
 										}
-										if (!cap.open(gifPath))
+										catch (const std::exception& ex)
 										{
-											Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + L": VideoCapture::Open fail");
-											continue;
+											Log.Write<LogLevel::Error>(*Convert::ToWString(ex.what()) + L": " + filePath.wstring());
 										}
-										cv::Mat gif;
-										for (uint64_t i = 0; cap.read(gif); ++i)
-										{
-											std::vector<uchar> rawData;
-											imencode(".bmp", gif, rawData);
-											std::string dataStr;
-											std::copy_n(rawData.begin(), rawData.size(), std::back_inserter(dataStr));
-											rawData.clear();
-											rawData.shrink_to_fit();
-											if (dataStr.empty())
-											{
-												Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + L": GIF: imencode fail");
-												break;
-											}
-											const auto subPath = filePath / *Convert::ToString(i);
-											Log.Write<LogLevel::Info>(L"load file: " + subPath.wstring());
-											img = ImageDatabase::Image(subPath, dataStr);
-											sink = sink.resume();
-										}
-										cap.release();
-										if (copy) std::filesystem::remove(gifPath);
+										if (decframe != nullptr) av_frame_free(&decframe);
+										if (frame != nullptr) av_frame_free(&frame);
+										if (vcodecCtx != nullptr) avcodec_free_context(&vcodecCtx);
+										if (inctx != nullptr) avformat_close_input(&inctx);
+										if (swsctx != nullptr) sws_freeContext(swsctx);
 									}
-									else
+									else if (OpenCvUtility::IsImage(filePath.extension()))
 									{
 										Log.Write<LogLevel::Info>(L"load file: " + file.path().wstring());
 										img = ImageDatabase::Image(file.path());
 										sink = sink.resume();
+									}
+									else
+									{
+										Log.Write<LogLevel::Warn>(L"Unsupported format: " + file.path().wstring());
 									}
 								}
 							}
@@ -277,6 +443,7 @@ int main(int argc, char* argv[])
 						try
 						{
 							img.ComputeVgg16();
+							Log.Write<LogLevel::Info>(L"file: " + img.Path.wstring() + L": vgg16 start with: " + *Convert::ToWString(img.Vgg16[0]));
 						}
 						catch (const cv::Exception& ex)
 						{
@@ -295,16 +462,26 @@ int main(int argc, char* argv[])
 					const auto dbPath = args.Value(dbArg);
 					const auto input = args.Value(pathArg);
 					ImageDatabase db(dbPath);
+					Log.Write<LogLevel::Info>(L"load database: " + dbPath.wstring());
 					db.Load(dbPath);
-					ImageDatabase::Image img(input);
-					img.ComputeMd5();
-					img.ComputeVgg16();
+					Log.Write<LogLevel::Info>(L"database size: " + *Convert::ToWString(db.Images.size()));
 
-					std::sort(std::execution::par_unseq, db.Images.begin(), db.Images.end(), [&](const ImageDatabase::Image& a, const ImageDatabase::Image& b)
+					Log.Write<LogLevel::Info>(L"load database: " + input.wstring());
+					ImageDatabase::Image img(input);
+					Log.Write<LogLevel::Info>(L"compute md5: " + input.wstring());
+					img.ComputeMd5();
+					Log.Write<LogLevel::Info>(L"compute vgg16: " + input.wstring());
+					img.ComputeVgg16();
+					Log.Write<LogLevel::Info>(L"file: " + img.Path.wstring() + L": vgg16 start with: " + *Convert::ToWString(img.Vgg16[0]));
+					img.FreeMemory();
+					
+					Log.Write<LogLevel::Info>(L"search start ...");
+					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [&](const ImageDatabase::Image& a, const ImageDatabase::Image& b)
 					{
 						return std::greater()(a.Vgg16.dot(img.Vgg16), b.Vgg16.dot(img.Vgg16));
 					});
 
+					Log.Write<LogLevel::Info>(L"search done.");
 					for (const auto& i : db.Images)
 					{
 						if (const auto v = i.Vgg16.dot(img.Vgg16); v >= 0.8f)

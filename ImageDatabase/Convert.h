@@ -5,6 +5,18 @@
 #include <optional>
 #include <filesystem>
 
+#ifndef _MSC_VER
+#include <sstream>
+
+template<typename T>
+[[nodiscard]] std::optional<std::string> __To_SString_Impl__(const T& value) noexcept
+{
+	std::ostringstream ss;
+	ss << value;
+	return ss.str();
+}
+#endif
+
 template<typename T, typename Str, typename Args>
 [[nodiscard]] std::optional<T> __From_String_Impl__(const Str value, const Args args) noexcept
 {
@@ -59,6 +71,12 @@ namespace Convert
 	[[nodiscard]] decltype(auto) ToString(const T value, const std::chars_format& fmt, const int precision) noexcept
 	{
 		return __To_String_Impl__<T>(value, fmt, precision);
+	}
+#else
+	template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+	[[nodiscard]] decltype(auto) ToString(const T value) noexcept
+	{
+		return __To_SString_Impl__<T>(value);
 	}
 #endif
 

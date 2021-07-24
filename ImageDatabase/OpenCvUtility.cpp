@@ -1,11 +1,31 @@
-#pragma once
-
 #include "OpenCvUtility.h"
 
 #include <fstream>
 
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/dnn.hpp>
+
 namespace OpenCvUtility
 {
+	bool IsImage(const std::string& extension)
+	{
+		static const std::unordered_set<std::string> ImageExtension {
+			".bmp", ".dib",
+			".jpeg", ".jpg", ".jpe",
+			".jp2",
+			".png",
+			".webp",
+			".pbm", ".pgm", ".ppm", ".pxm", ".pnm",
+			".pfm",
+			".sr", ".ras",
+			".tiff", ".tif",
+			".exr",
+			".hdr", ".pic"
+		};
+
+		return ImageExtension.find(extension) != ImageExtension.end();
+	}
+
 	std::optional<std::string> ReadToEnd(const std::filesystem::path& path)
 	{
 		std::string data;

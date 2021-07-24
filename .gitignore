@@ -364,3 +364,7 @@ FodyWeavers.xsd
 
 # Caffe Model
 *.caffemodel
+
+# Visual Studio Code CMake Build
+build
+.vscode
