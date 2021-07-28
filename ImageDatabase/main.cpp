@@ -21,7 +21,6 @@ extern "C" {
 
 #include "Arguments.h"
 #include "Convert.h"
-#include "Cryptography.h"
 #include "ImageDatabase.h"
 #include "StdIO.h"
 #include "Thread.h"
@@ -76,27 +75,28 @@ int main(int argc, char* argv[])
 	args.Add(logLevelArg);
 	args.Add(logFileArg);
 
-	std::thread logThread;
 #ifdef CatchEx
 	try
 #endif
 	{
+		std::thread logThread;
 		args.Parse(argc, argv);
 
 		logThread = std::thread([](const LogLevel& level, std::filesystem::path logFile)
 		{
-			cv::redirectError([](int status, const char* func_name, const char* err_msg,
-				const char* file_name, int line, void*)
+			cv::redirectError([](const int status, const char* funcName, const char* errMsg,
+			                     const char* fileName, const int line, void*)
 			{
-				Log.Write<LogLevel::Error>(
+				auto msg =
 					L"[" +
-						*Convert::ToWString(file_name) + L":" +
-						*Convert::ToWString(func_name) + L":" +
+						*Convert::ToWString(fileName) + L":" +
+						*Convert::ToWString(funcName) + L":" +
 						*Convert::ToWString(line) +
-					L"] " + 
-					L"status: " + *Convert::ToWString(status) +L": " +
-					*Convert::ToWString(err_msg)
-				);
+					L"] " +
+					L"status: " + *Convert::ToWString(status) + L": " +
+					*Convert::ToWString(errMsg);
+				if (const auto pos = msg.find_last_of(L'\n'); pos != std::wstring::npos) msg.erase(msg.find_last_of(L'\n'));
+				Log.Write<LogLevel::Error>(msg);
 				return 0;
 			});
 
@@ -116,16 +116,16 @@ int main(int argc, char* argv[])
 					return AV_LOG_INFO;
 				}
 			}());
-			av_log_set_callback([](void* avcl, int fflevel, const char* fmt, va_list vl)
+			av_log_set_callback([](void* avc, const int ffLevel, const char* fmt, const va_list vl)
 			{
 				static char buf[4096]{ 0 };
 				int ret = 1;
-				av_log_format_line2(avcl, fflevel, fmt, vl, buf, 4096, &ret);
-				auto data = *Convert::ToWString((char*)buf);
-				data.erase(data.find_last_of(L'\n'));
-				if (fflevel <= 16) Log.Write<LogLevel::Error>(data);
-				else if (fflevel <= 24) Log.Write<LogLevel::Warn>(data);
-				else if (fflevel <= 32) Log.Write<LogLevel::Log>(data);
+				av_log_format_line2(avc, ffLevel, fmt, vl, buf, 4096, &ret);
+				auto data = *Convert::ToWString(static_cast<char*>(buf));
+				if (const auto pos = data.find_last_of(L'\n'); pos != std::wstring::npos) data.erase(pos);
+				if (ffLevel <= 16) Log.Write<LogLevel::Error>(data);
+				else if (ffLevel <= 24) Log.Write<LogLevel::Warn>(data);
+				else if (ffLevel <= 32) Log.Write<LogLevel::Log>(data);
 				else Log.Write<LogLevel::Debug>(data);
 			});
 
@@ -187,27 +187,27 @@ int main(int argc, char* argv[])
 
 					Log.Write<LogLevel::Debug>([]()
 					{
-						static void* iterate_data = NULL;
-						const auto Encoder_GetNextCodecName = []()->std::string
+						static void* iterateData = nullptr;
+						const auto encoderGetNextCodecName = []()->std::string
 						{
-							auto current_codec = av_codec_iterate(&iterate_data);
-							while (current_codec != NULL)
+							auto currentCodec = av_codec_iterate(&iterateData);
+							while (currentCodec != nullptr)
 							{
-								if (!av_codec_is_decoder(current_codec) && current_codec->type == AVMEDIA_TYPE_VIDEO)
+								if (!av_codec_is_decoder(currentCodec) && currentCodec->type == AVMEDIA_TYPE_VIDEO)
 								{
-									current_codec = av_codec_iterate(&iterate_data);
+									currentCodec = av_codec_iterate(&iterateData);
 									continue;
 								}
-								return current_codec->name;
+								return currentCodec->name;
 							}
 							return "";
 						};
 						std::wstring buf;
-						auto dt = Encoder_GetNextCodecName();
+						auto dt = encoderGetNextCodecName();
 						while (!dt.empty())
 						{
 							buf.append(*Convert::ToWString(dt.c_str()) + L" ");
-							dt = Encoder_GetNextCodecName();
+							dt = encoderGetNextCodecName();
 						}
 						return buf;
 					}());
@@ -219,7 +219,7 @@ int main(int argc, char* argv[])
 							{
 								if (file.is_regular_file())
 								{
-									const auto filePath = file.path();
+									const auto& filePath = file.path();
 									Log.Write<LogLevel::Log>(L"Scan file: " + filePath.wstring());
 									if (filePath.extension() == ".zip")
 									{
@@ -227,14 +227,14 @@ int main(int argc, char* argv[])
 
 										zip_error_t error;
 										zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.length(), 0, &error);
-										if (src == NULL && error.zip_err != ZIP_ER_OK)
+										if (src == nullptr && error.zip_err != ZIP_ER_OK)
 										{
 											Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + std::filesystem::path(error.str).wstring());
 											continue;
 										}
 
 										zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &error);
-										if (za == NULL && error.zip_err != ZIP_ER_OK)
+										if (za == nullptr && error.zip_err != ZIP_ER_OK)
 										{
 											Log.Write<LogLevel::Error>(L"load file: " + file.path().wstring() + *Convert::ToWString(error.zip_err));
 											continue;
@@ -243,7 +243,7 @@ int main(int argc, char* argv[])
 										const auto entries = zip_get_num_entries(za, 0);
 										if (entries < 0)
 										{
-											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString((char*)zip_get_error(za)->str));
+											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString(zip_get_error(za)->str));
 											zip_close(za);
 											continue;
 										}
@@ -295,103 +295,104 @@ int main(int argc, char* argv[])
 										ext == ".ts" ||
 										ext == ".m2ts" ||
 										ext == ".rmvb" ||
-										ext == ".mpeg")
+										ext == ".mpeg" ||
+										ext == ".webm")
 									{
 										std::string gifPath = filePath.u8string();
-										int ret;
 
-										AVFormatContext* inctx = nullptr;
-										AVCodec* vcodec = nullptr;
-										AVCodecContext* vcodecCtx = nullptr;
+										AVFormatContext* fmtCtx = nullptr;
+										AVCodec* codec = nullptr;
+										AVCodecContext* codecCtx = nullptr;
 										AVFrame* frame = nullptr;
-										AVFrame* decframe = nullptr;
-										SwsContext* swsctx = nullptr;
+										AVFrame* decFrame = nullptr;
+										SwsContext* swsCtx = nullptr;
 
 										try
 										{
-											ret = avformat_open_input(&inctx, gifPath.c_str(), nullptr, nullptr);
+											int ret;
+											ret = avformat_open_input(&fmtCtx, gifPath.c_str(), nullptr, nullptr);
 											if (ret < 0) throw std::runtime_error("avforamt_open_input fail: " + *Convert::ToString(ret));
 
-											ret = avformat_find_stream_info(inctx, nullptr);
+											ret = avformat_find_stream_info(fmtCtx, nullptr);
 											if (ret < 0) throw std::runtime_error("avformat_find_stream_info fail: " + *Convert::ToString(ret));
 
-											ret = av_find_best_stream(inctx, AVMEDIA_TYPE_VIDEO, -1, -1, &vcodec, 0);
+											ret = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
 											if (ret < 0) throw std::runtime_error("av_find_best_stream fail: " + *Convert::ToString(ret));
 
-											const int vstrm_idx = ret;
-											auto vstrm = inctx->streams[vstrm_idx]->codecpar;
+											const int streamId = ret;
+											auto codecParams = fmtCtx->streams[streamId]->codecpar;
 
-											vcodecCtx = avcodec_alloc_context3(vcodec);
-											if (!vcodecCtx) throw std::runtime_error("avcodec_alloc_context3 fail");
+											codecCtx = avcodec_alloc_context3(codec);
+											if (!codecCtx) throw std::runtime_error("avcodec_alloc_context3 fail");
 
-											avcodec_parameters_to_context(vcodecCtx, vstrm);
-											ret = avcodec_open2(vcodecCtx, vcodec, nullptr);
+											avcodec_parameters_to_context(codecCtx, codecParams);
+											ret = avcodec_open2(codecCtx, codec, nullptr);
 											if (ret < 0) throw std::runtime_error("avcodec_open2 fail: " + *Convert::ToString(ret));
 
-											const int dst_width = vstrm->width;
-											const int dst_height = vstrm->height;
-											const AVPixelFormat dst_pix_fmt = AV_PIX_FMT_BGR24;
-											if (vcodecCtx->pix_fmt != AV_PIX_FMT_NONE)
+											const int dstWidth = codecParams->width;
+											const int dstHeight = codecParams->height;
+											const AVPixelFormat dstPixFmt = AV_PIX_FMT_BGR24;
+											if (codecCtx->pix_fmt != AV_PIX_FMT_NONE)
 											{
-												swsctx = sws_getCachedContext(
-													nullptr, vstrm->width, vstrm->height, vcodecCtx->pix_fmt,
-													dst_width, dst_height, dst_pix_fmt, 0, nullptr, nullptr, nullptr);
-												if (!swsctx) throw std::runtime_error("sws_getCachedContext fail");
+												swsCtx = sws_getCachedContext(
+													nullptr, codecParams->width, codecParams->height, codecCtx->pix_fmt,
+													dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
+												if (!swsCtx) throw std::runtime_error("sws_getCachedContext fail");
 											}
 
 											frame = av_frame_alloc();
-											std::string framebuf(av_image_get_buffer_size(dst_pix_fmt, dst_width, dst_height, dst_width), 0);
+											std::string frameBuf(av_image_get_buffer_size(dstPixFmt, dstWidth, dstHeight, dstWidth), 0);
 											av_image_fill_arrays(
 												frame->data, frame->linesize,
-												(uint8_t*)framebuf.data(),
-												dst_pix_fmt, dst_width, dst_height, dst_width);
+												reinterpret_cast<uint8_t*>(frameBuf.data()),
+												dstPixFmt, dstWidth, dstHeight, dstWidth);
 						
-											decframe = av_frame_alloc();
-											bool end_of_stream = false;
+											decFrame = av_frame_alloc();
+											bool eof = false;
 											AVPacket* pkt = av_packet_alloc();
 											do
 											{
-												if (!end_of_stream)
+												if (!eof)
 												{
-													ret = av_read_frame(inctx, pkt);
+													ret = av_read_frame(fmtCtx, pkt);
 													if (ret < 0 && ret != AVERROR_EOF) throw std::runtime_error("av_read_frame fail: " + *Convert::ToString(ret));
 													
-													if (ret == 0 && pkt->stream_index != vstrm_idx)
+													if (ret == 0 && pkt->stream_index != streamId)
 													{
 														av_packet_unref(pkt);
 														continue;
 													}
-													end_of_stream = (ret == AVERROR_EOF);
+													eof = (ret == AVERROR_EOF);
 												}
-												if (end_of_stream)
+												if (eof)
 												{
 													av_packet_unref(pkt);
 													ret = 0;
 												}
-												else {ret = avcodec_send_packet(vcodecCtx, pkt);
+												else {ret = avcodec_send_packet(codecCtx, pkt);
 												if (ret < 0) throw std::runtime_error("avcodec_send_packet: error sending a packet for decoding: " + *Convert::ToString(ret));
 												}
 												while (ret >= 0)
 												{
-													ret = avcodec_receive_frame(vcodecCtx, decframe);
+													ret = avcodec_receive_frame(codecCtx, decFrame);
 													if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
 													{
 														av_packet_unref(pkt);
 														break;
 													}
-													else if (ret < 0) throw std::runtime_error("avcodec_receive_frame: error during decoding: " + *Convert::ToString(ret));
-											
-													if (swsctx == nullptr)
+													if (ret < 0) throw std::runtime_error("avcodec_receive_frame: error during decoding: " + *Convert::ToString(ret));
+
+													if (swsCtx == nullptr)
 													{
-														swsctx = sws_getCachedContext(
-															nullptr, vstrm->width, vstrm->height, vcodecCtx->pix_fmt,
-															dst_width, dst_height, dst_pix_fmt, 0, nullptr, nullptr, nullptr);
-														if (!swsctx) throw std::runtime_error("sws_getCachedContext fail");
+														swsCtx = sws_getCachedContext(
+															nullptr, codecParams->width, codecParams->height, codecCtx->pix_fmt,
+															dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
+														if (!swsCtx) throw std::runtime_error("sws_getCachedContext fail");
 													}
 							
-													sws_scale(swsctx, decframe->data, decframe->linesize, 0, decframe->height, frame->data, frame->linesize);
+													sws_scale(swsCtx, decFrame->data, decFrame->linesize, 0, decFrame->height, frame->data, frame->linesize);
 
-													cv::Mat image(dst_height, dst_width, CV_8UC3, (uint8_t*)framebuf.data(), frame->linesize[0]);
+													cv::Mat image(dstHeight, dstWidth, CV_8UC3, (frameBuf.data()), frame->linesize[0]);
 													//cv::imshow("", image);
 													//cv::waitKey(0);
 													std::vector<uchar> rawData;
@@ -400,26 +401,26 @@ int main(int argc, char* argv[])
 													std::copy_n(rawData.begin(), rawData.size(), std::back_inserter(dataStr));
 													rawData.clear();
 													rawData.shrink_to_fit();
-													const auto subPath = filePath / *Convert::ToString(vcodecCtx->frame_number);
+													const auto subPath = filePath / *Convert::ToString(codecCtx->frame_number);
 													Log.Write<LogLevel::Info>(L"load file: " + subPath.wstring());
 													img = ImageDatabase::Image(subPath, dataStr);
 													sink = sink.resume();
 												}
 												av_packet_unref(pkt);
-											} while (!end_of_stream);
+											} while (!eof);
 											av_packet_free(&pkt);
 										}
 										catch (const std::exception& ex)
 										{
 											Log.Write<LogLevel::Error>(*Convert::ToWString(ex.what()) + L": " + filePath.wstring());
 										}
-										if (decframe != nullptr) av_frame_free(&decframe);
+										if (decFrame != nullptr) av_frame_free(&decFrame);
 										if (frame != nullptr) av_frame_free(&frame);
-										if (vcodecCtx != nullptr) avcodec_free_context(&vcodecCtx);
-										if (inctx != nullptr) avformat_close_input(&inctx);
-										if (swsctx != nullptr) sws_freeContext(swsctx);
+										if (codecCtx != nullptr) avcodec_free_context(&codecCtx);
+										if (fmtCtx != nullptr) avformat_close_input(&fmtCtx);
+										if (swsCtx != nullptr) sws_freeContext(swsCtx);
 									}
-									else if (OpenCvUtility::IsImage(filePath.extension()))
+									else if (OpenCvUtility::IsImage(filePath.extension().string()))
 									{
 										Log.Write<LogLevel::Info>(L"load file: " + file.path().wstring());
 										img = ImageDatabase::Image(file.path());

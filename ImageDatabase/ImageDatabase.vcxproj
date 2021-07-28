@@ -167,6 +167,7 @@
     <ClCompile Include="OpenCvUtility.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Algorithm.h" />
     <ClInclude Include="Arguments.h" />
     <ClInclude Include="Convert.h" />
     <ClInclude Include="Cryptography.h" />
