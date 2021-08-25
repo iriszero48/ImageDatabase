@@ -6,6 +6,7 @@
 #include <optional>
 #include <thread>
 #include <string>
+#include <chrono>
 
 #include <zip.h>
 #include <boost/context/continuation.hpp>
@@ -26,12 +27,109 @@ extern "C" {
 #include "Thread.h"
 #include "Log.h"
 #include "Algorithm.h"
+#include "File.h"
 
 ArgumentOption(Operator, build, query)
 
 #define CatchEx
 
-static Logger<std::wstring> Log;
+struct LogMsg
+{
+	decltype(std::chrono::system_clock::now()) Time;
+	char* File;
+	uint64_t Line;
+	char* Function;
+	std::string Message;
+};
+
+static Logger<LogMsg> Log;
+
+void DealFile(const std::filesystem::path& path)
+{
+
+}
+
+void DealFile(const uint8_t* path, uint64_t len)
+{
+	
+}
+
+void DealPath(const std::filesystem::path& path)
+{
+	const auto ext = path.extension().u8string();
+	static const std::unordered_set<std::string> CompExt { ".zip", ".7z", ".rar", ".gz", ".xz" };
+	if (CompExt.find(ext) != CompExt.end())
+	{
+		const auto zipFile = File::ReadToEnd(path);
+
+		std::string errLog;
+		zip_error_t error;
+		zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.length(), 0, &error);
+		if (src == nullptr && error.zip_err != ZIP_ER_OK)
+		{
+			Log.Write<LogLevel::Error>(String::FormatWstr("[DealPath] load file: {} {}", file.path().wstring(), error.str));
+			Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + std::filesystem::path(error.str).wstring());
+			continue;
+		}
+
+										zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &error);
+										if (za == nullptr && error.zip_err != ZIP_ER_OK)
+										{
+											Log.Write<LogLevel::Error>(L"load file: " + file.path().wstring() + *Convert::ToWString(error.zip_err));
+											continue;
+										}
+
+										const auto entries = zip_get_num_entries(za, 0);
+										if (entries < 0)
+										{
+											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString(zip_get_error(za)->str));
+											zip_close(za);
+											continue;
+										}
+
+										for (int i = 0; i < entries; ++i)
+										{
+											struct zip_stat zs;
+											if (zip_stat_index(za, i, 0, &zs) == 0)
+											{
+												if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
+												{
+													auto* const zf = zip_fopen_index(za, i, 0);
+													if (zf == nullptr
+														&& zip_get_error(za)->zip_err != ZIP_ER_OK)
+													{
+														Log.Write<LogLevel::Error>(L"load file: zip_fopen_index: fail");
+														continue;
+													}
+													const auto buf = std::make_unique<char[]>(zs.size);
+													if (zip_fread(zf, buf.get(), zs.size) < 0)
+													{
+														Log.Write<LogLevel::Error>(L"load file: zip_fread: fail");
+														zip_fclose(zf);
+														continue;
+													}
+													img = ImageDatabase::Image(file.path() / filename, std::string(buf.get(), zs.size));
+													zip_fclose(zf);
+
+													sink = sink.resume();
+												}
+											}
+										}
+										zip_close(za);
+	}
+	else
+	{
+		DealFile(path);
+	}
+}
+
+void ScanFiles(const std::filesystem::path& path)
+{
+	for (const auto& file : std::filesystem::recursive_directory_iterator(path))
+	{
+		if (file.is_regular_file()) DealPath(file.path());
+	}
+}
 
 int main(int argc, char* argv[])
 {
@@ -116,7 +214,7 @@ int main(int argc, char* argv[])
 					return AV_LOG_INFO;
 				}
 			}());
-			av_log_set_callback([](void* avc, const int ffLevel, const char* fmt, const va_list vl)
+			av_log_set_callback([](void* avc, int ffLevel, const char* fmt, va_list vl)
 			{
 				static char buf[4096]{ 0 };
 				int ret = 1;
@@ -183,6 +281,7 @@ int main(int argc, char* argv[])
 					const auto buildPath = args.Value(pathArg);
 					ImageDatabase db(dbPath);
 
+					std::string fileData;
 					ImageDatabase::Image img;
 
 					Log.Write<LogLevel::Debug>([]()
@@ -211,6 +310,27 @@ int main(int argc, char* argv[])
 						}
 						return buf;
 					}());
+
+					std::string curFile{};
+					boost::context::continuation scanFile = boost::context::callcc([&](boost::context::continuation&& sink)
+					{
+						for (const auto& file : std::filesystem::recursive_directory_iterator(buildPath))
+						{
+							if (file.is_regular_file())
+							{
+								curFile = file.path();
+								sink = sink.resume();
+							}
+						}
+					});
+
+
+					boost::context::continuation readFile = boost::context::callcc(
+						[&](boost::context::continuation&& sink)
+						{
+							
+						}
+					);
 
 					boost::context::continuation source = boost::context::callcc(
 						[&](boost::context::continuation&& sink)
