@@ -10,7 +10,6 @@ find_package(Threads REQUIRED)
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
-find_package(Boost REQUIRED COMPONENTS context)
 find_package(FFMPEG REQUIRED)
 find_package(TBB CONFIG REQUIRED)
 
@@ -26,7 +25,6 @@ target_link_libraries(imgdb PRIVATE
     Eigen3::Eigen
     opencv_core opencv_imgcodecs opencv_dnn opencv_highgui
     libzip::zip
-    Boost::boost Boost::context
     ${FFMPEG_LIBRARIES}
     TBB::tbb
 )

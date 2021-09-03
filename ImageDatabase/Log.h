@@ -26,7 +26,7 @@ public:
 	{
 		if (Level <= level)
 		{
-			WriteImpl<Level>(T(std::forward<Args>(args)...));
+			WriteImpl<Level>(T{std::forward<Args>(args)...});
 		}
 	}
 

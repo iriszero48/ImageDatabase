@@ -35,10 +35,13 @@ namespace __Detail
 
 #ifdef MacintoshPlatform
 #include <tbb/parallel_sort.h>
+#include <tbb/parallel_for.h>
 #endif
 
 namespace Algorithm
 {
+    constexpr int Version[]{1, 0, 0, 0};
+
     template<bool Parallel = false, typename It, typename Cmp>
     void Sort(It&& begin, It&& end, Cmp&& cmp)
     {
@@ -57,6 +60,30 @@ namespace Algorithm
         else
         {
             std::sort(begin, end, cmp);
+        }
+    }
+
+    template<bool Parallel = false, typename It, typename Func>
+    void ForEach(It&& begin, It&& end, Func&& op)
+    {
+        if constexpr (Parallel)
+        {
+            #ifdef MacintoshPlatform
+            {
+                tbb::parallel_for(0, end - begin, [&](std::size_t index)
+                {
+                    op(begin + index);
+                });
+            }
+            #else
+            {
+                std::for_each(std::execution::par_unseq, begin, end, op);
+            }
+			#endif
+        }
+        else
+        {
+            std::for_each(begin, end, op);
         }
     }
 }

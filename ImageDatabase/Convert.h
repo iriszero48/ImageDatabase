@@ -11,14 +11,38 @@
 template<typename T>
 [[nodiscard]] std::optional<std::string> __To_SString_Impl__(const T& value) noexcept
 {
-	std::ostringstream ss;
-	ss << value;
-	return ss.str();
+	try
+	{
+		std::ostringstream ss;
+		ss << value;
+		return ss.str();
+	}
+	catch(...)
+	{
+		return std::nullopt;
+	}
+}
+
+template<typename T>
+[[nodiscard]] std::optional<T> __From_SString_Impl__(const std::string& value) noexcept
+{
+	try
+	{
+		T val;
+		std::stringstream ss(value);
+		ss >> val;
+		return val;
+	}
+	catch(...)
+	{
+		return std::nullopt;
+	}
+	
 }
 #endif
 
 template<typename T, typename Str, typename Args>
-[[nodiscard]] std::optional<T> __From_String_Impl__(const Str value, const Args args) noexcept
+[[nodiscard]] std::optional<T> __From_String_Impl__(const Str& value, const Args args) noexcept
 {
 	T res;
 	const auto begin = value.data();
@@ -39,14 +63,7 @@ template<typename T, typename...Args>
 
 namespace Convert
 {
-	template<typename T, std::enable_if_t<std::negation_v<typename std::disjunction<
-		typename std::is_integral<T>::value,
-		typename std::is_floating_point<T>::value
-	>::value>, int> = 0>
-		[[nodiscard]] std::optional<std::string> ToString(const T& value)
-	{
-		return std::string(value);
-	}
+    constexpr auto Version = "1.0.0";
 
 	template<typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	[[nodiscard]] decltype(auto) ToString(const T value, const int base = 10) noexcept
@@ -92,21 +109,11 @@ namespace Convert
 	{
 		return __From_String_Impl__<T>(value, fmt);
 	}
+#else
+	template<typename T, typename Str, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+	[[nodiscard]] decltype(auto) FromString(const Str value, const std::chars_format& fmt = std::chars_format::general) noexcept
+	{
+		return __From_SString_Impl__<T>(std::string(value));
+	}
 #endif
-
-	template<typename T, typename... Args, std::enable_if_t<std::is_arithmetic_v<T>, int> = 0>
-	[[nodiscard]] std::optional<std::wstring> ToWString(const T value, Args&&... args) noexcept
-	{
-		if (const auto res = Convert::ToString(value, std::forward<Args>(args)...); res.has_value())
-		{
-			return std::filesystem::path(*res).wstring();
-		}
-		return {};
-	}
-
-	template<typename T, std::enable_if_t<std::is_pointer_v<T>, int> = 0>
-	[[nodiscard]] std::optional<std::wstring> ToWString(const T& value) noexcept
-	{
-		return std::filesystem::path(std::string(value)).wstring();
-	}
 }
