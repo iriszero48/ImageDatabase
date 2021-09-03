@@ -17,6 +17,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/error.h>
 #include <libswscale/swscale.h>
 }
 
@@ -28,6 +29,12 @@ extern "C" {
 #include "Log.h"
 #include "Algorithm.h"
 #include "File.h"
+#include "Requires.h"
+#include "Time.h"
+
+static_assert(Requires::Require(Requires::Version, {1, 0, 0, 0}));
+static_assert(Requires::Require(Algorithm::Version, {1, 0, 0, 0}));
+static_assert(Requires::Require(Bit::Version, {1, 0, 0, 0}));
 
 ArgumentOption(Operator, build, query)
 
@@ -36,99 +43,49 @@ ArgumentOption(Operator, build, query)
 struct LogMsg
 {
 	decltype(std::chrono::system_clock::now()) Time;
-	char* File;
-	uint64_t Line;
-	char* Function;
-	std::string Message;
-};
+	const char* File;
+	decltype(__LINE__) Line;
+	const char* Function;
+	std::wstring Message;
+}; 
 
 static Logger<LogMsg> Log;
+#define LogImpl(level, ...) Log.Write<level>(std::chrono::system_clock::now(), "main.cpp", __LINE__, __func__, String::FormatWstr(__VA_ARGS__))
+#define LogNone(...) LogImpl(LogLevel::None, __VA_ARGS__)
+#define LogErr(...) LogImpl(LogLevel::Error, __VA_ARGS__)
+#define LogWarn(...) LogImpl(LogLevel::Warn, __VA_ARGS__)
+#define LogLog(...) LogImpl(LogLevel::Log, __VA_ARGS__)
+#define LogInfo(...) LogImpl(LogLevel::Info, __VA_ARGS__)
+#define LogDebug(...) LogImpl(LogLevel::Debug, __VA_ARGS__)
 
-void DealFile(const std::filesystem::path& path)
+static void __LogException_Impl__(std::vector<std::string>& out, const std::exception& e, int level)
 {
-
-}
-
-void DealFile(const uint8_t* path, uint64_t len)
-{
-	
-}
-
-void DealPath(const std::filesystem::path& path)
-{
-	const auto ext = path.extension().u8string();
-	static const std::unordered_set<std::string> CompExt { ".zip", ".7z", ".rar", ".gz", ".xz" };
-	if (CompExt.find(ext) != CompExt.end())
+	out.push_back(String::FormatStr("{}{}", std::string(level * 2, ' '), e.what()));
+	try
 	{
-		const auto zipFile = File::ReadToEnd(path);
-
-		std::string errLog;
-		zip_error_t error;
-		zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.length(), 0, &error);
-		if (src == nullptr && error.zip_err != ZIP_ER_OK)
-		{
-			Log.Write<LogLevel::Error>(String::FormatWstr("[DealPath] load file: {} {}", file.path().wstring(), error.str));
-			Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + std::filesystem::path(error.str).wstring());
-			continue;
-		}
-
-										zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &error);
-										if (za == nullptr && error.zip_err != ZIP_ER_OK)
-										{
-											Log.Write<LogLevel::Error>(L"load file: " + file.path().wstring() + *Convert::ToWString(error.zip_err));
-											continue;
-										}
-
-										const auto entries = zip_get_num_entries(za, 0);
-										if (entries < 0)
-										{
-											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString(zip_get_error(za)->str));
-											zip_close(za);
-											continue;
-										}
-
-										for (int i = 0; i < entries; ++i)
-										{
-											struct zip_stat zs;
-											if (zip_stat_index(za, i, 0, &zs) == 0)
-											{
-												if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
-												{
-													auto* const zf = zip_fopen_index(za, i, 0);
-													if (zf == nullptr
-														&& zip_get_error(za)->zip_err != ZIP_ER_OK)
-													{
-														Log.Write<LogLevel::Error>(L"load file: zip_fopen_index: fail");
-														continue;
-													}
-													const auto buf = std::make_unique<char[]>(zs.size);
-													if (zip_fread(zf, buf.get(), zs.size) < 0)
-													{
-														Log.Write<LogLevel::Error>(L"load file: zip_fread: fail");
-														zip_fclose(zf);
-														continue;
-													}
-													img = ImageDatabase::Image(file.path() / filename, std::string(buf.get(), zs.size));
-													zip_fclose(zf);
-
-													sink = sink.resume();
-												}
-											}
-										}
-										zip_close(za);
+		std::rethrow_if_nested(e);
 	}
-	else
+	catch(const std::exception& e)
 	{
-		DealFile(path);
+		__LogException_Impl__(out, e, level + 1);
 	}
 }
 
-void ScanFiles(const std::filesystem::path& path)
+std::string LogException(const std::exception& e)
 {
-	for (const auto& file : std::filesystem::recursive_directory_iterator(path))
-	{
-		if (file.is_regular_file()) DealPath(file.path());
-	}
+	std::vector<std::string> out{};
+	__LogException_Impl__(out, e, 0);
+	return String::JoinStr(out.begin(), out.end(), "\n");
+}
+
+decltype(auto) LogTime(const decltype(LogMsg::Time)& time)
+{
+	auto t = std::chrono::system_clock::to_time_t(time);
+	tm local{};
+	Time::Local(&local, &t);
+	std::ostringstream ss;
+	ss << std::put_time(&local, "%F %X");
+	return ss.str();
 }
 
 int main(int argc, char* argv[])
@@ -151,6 +108,18 @@ int main(int argc, char* argv[])
 		"-i",
 		"input path"
 	};
+	ArgumentsParse::Argument<float> thresholdArg
+	{
+		"-t",
+		"threshold [0.0, 1.0] {0.8}",
+		0.8,
+		ArgumentsFunc(thresholdArg)
+		{
+			const auto val = *Convert::FromString<float>(value);
+			if (!(val >= 0.0 && val <= 1.0)) return { std::nullopt, "range error" };
+			return { val, {} };
+		}
+	};
 	ArgumentsParse::Argument<LogLevel> logLevelArg
 	{
 		"--loglevel",
@@ -170,6 +139,7 @@ int main(int argc, char* argv[])
 	args.Add(opArg);
 	args.Add(dbArg);
 	args.Add(pathArg);
+	args.Add(thresholdArg);
 	args.Add(logLevelArg);
 	args.Add(logFileArg);
 
@@ -180,24 +150,10 @@ int main(int argc, char* argv[])
 		std::thread logThread;
 		args.Parse(argc, argv);
 
+		const auto logLevel = args.Value(logLevelArg);
+
 		logThread = std::thread([](const LogLevel& level, std::filesystem::path logFile)
 		{
-			cv::redirectError([](const int status, const char* funcName, const char* errMsg,
-			                     const char* fileName, const int line, void*)
-			{
-				auto msg =
-					L"[" +
-						*Convert::ToWString(fileName) + L":" +
-						*Convert::ToWString(funcName) + L":" +
-						*Convert::ToWString(line) +
-					L"] " +
-					L"status: " + *Convert::ToWString(status) + L": " +
-					*Convert::ToWString(errMsg);
-				if (const auto pos = msg.find_last_of(L'\n'); pos != std::wstring::npos) msg.erase(msg.find_last_of(L'\n'));
-				Log.Write<LogLevel::Error>(msg);
-				return 0;
-			});
-
 			av_log_set_level([&]()
 			{
 				switch (level)
@@ -219,12 +175,12 @@ int main(int argc, char* argv[])
 				static char buf[4096]{ 0 };
 				int ret = 1;
 				av_log_format_line2(avc, ffLevel, fmt, vl, buf, 4096, &ret);
-				auto data = *Convert::ToWString(static_cast<char*>(buf));
+				auto data = String::ToString<std::wstring>(buf);
 				if (const auto pos = data.find_last_of(L'\n'); pos != std::wstring::npos) data.erase(pos);
-				if (ffLevel <= 16) Log.Write<LogLevel::Error>(data);
-				else if (ffLevel <= 24) Log.Write<LogLevel::Warn>(data);
-				else if (ffLevel <= 32) Log.Write<LogLevel::Log>(data);
-				else Log.Write<LogLevel::Debug>(data);
+				if (ffLevel <= 16) LogErr(data);
+				else if (ffLevel <= 24) LogWarn(data);
+				else if (ffLevel <= 32) LogLog(data);
+				else LogDebug(data);
 			});
 
 			Log.level = level;
@@ -236,30 +192,22 @@ int main(int argc, char* argv[])
 				fs.rdbuf()->pubsetbuf(buf.get(), 4096);
 				if (!fs)
 				{
-					Log.Write<LogLevel::Error>(L"log file: " + logFile.wstring() + L": open fail");
+					LogErr(L"log file: " + logFile.wstring() + L": open fail");
 					logFile = "";
 				}
 			}
 
 			while (true)
 			{
-				const auto [level, msg] = Log.Chan.Read();
-				std::string out;
-				String::StringCombine(out, "[", ToString(level), "] ");
-				auto utf8 = false;
-				try
-				{
-					String::StringCombine(out, std::filesystem::path(msg).string());
-				}
-				catch (...)
-				{
-					utf8 = true;
-					String::StringCombine(out, std::filesystem::path(msg).u8string());
-				}
+				const auto [level, raw] = Log.Chan.Read();
+				const auto& [time, file, line, func, msg] = raw;
+
+				const auto out = String::FormatStr("[{}] [{}] [{}:{}] [{}] {}", ToString(level), LogTime(time), file, line, func, std::filesystem::path(msg).u8string());
+
 				Console::WriteLine(out);
 				if (!logFile.empty())
 				{
-					fs << (utf8 ? out : std::filesystem::path(out).u8string()) << std::endl;
+					fs << out << std::endl;
 					fs.flush();
 				}
 
@@ -269,345 +217,84 @@ int main(int argc, char* argv[])
 					break;
 				}
 			}
-		}, args.Value(logLevelArg), args.Value(logFileArg));
+		}, logLevel, args.Value(logFileArg));
 
 		try
 		{
+			static const auto LogForward = [](const std::string& msg)
+			{
+				LogDebug(msg);
+			};
+			
 			std::unordered_map<Operator, std::function<void()>>
 			{
 				{Operator::build, [&]()
 				{
 					const auto dbPath = args.Value(dbArg);
 					const auto buildPath = args.Value(pathArg);
-					ImageDatabase db(dbPath);
 
-					std::string fileData;
-					ImageDatabase::Image img;
+					ImageDatabase::Database db{};
+					//if (logLevel >= LogLevel::Debug)
+					 db.SetLog(LogForward);
 
-					Log.Write<LogLevel::Debug>([]()
+					for (const auto& file : std::filesystem::recursive_directory_iterator(buildPath))
 					{
-						static void* iterateData = nullptr;
-						const auto encoderGetNextCodecName = []()->std::string
+						if (file.is_regular_file())
 						{
-							auto currentCodec = av_codec_iterate(&iterateData);
-							while (currentCodec != nullptr)
+							try
 							{
-								if (!av_codec_is_decoder(currentCodec) && currentCodec->type == AVMEDIA_TYPE_VIDEO)
-								{
-									currentCodec = av_codec_iterate(&iterateData);
-									continue;
-								}
-								return currentCodec->name;
+								const auto filePath = file.path();
+								LogInfo("load file '{}'", filePath.wstring());
+								ImageDatabase::ImageFile img(filePath);
+								//if (logLevel >= LogLevel::Debug) 
+								img.SetLog(LogForward);
+								std::copy(img.Images.begin(), img.Images.end(), std::back_inserter(db.Images));
+								LogInfo("image count: {}", img.Images.size());
 							}
-							return "";
-						};
-						std::wstring buf;
-						auto dt = encoderGetNextCodecName();
-						while (!dt.empty())
-						{
-							buf.append(*Convert::ToWString(dt.c_str()) + L" ");
-							dt = encoderGetNextCodecName();
-						}
-						return buf;
-					}());
-
-					std::string curFile{};
-					boost::context::continuation scanFile = boost::context::callcc([&](boost::context::continuation&& sink)
-					{
-						for (const auto& file : std::filesystem::recursive_directory_iterator(buildPath))
-						{
-							if (file.is_regular_file())
+							catch(const std::exception& e)
 							{
-								curFile = file.path();
-								sink = sink.resume();
+								LogErr(LogException(e));
 							}
-						}
-					});
-
-
-					boost::context::continuation readFile = boost::context::callcc(
-						[&](boost::context::continuation&& sink)
-						{
 							
 						}
-					);
-
-					boost::context::continuation source = boost::context::callcc(
-						[&](boost::context::continuation&& sink)
-						{
-							for (const auto& file : std::filesystem::recursive_directory_iterator(buildPath))
-							{
-								if (file.is_regular_file())
-								{
-									const auto& filePath = file.path();
-									Log.Write<LogLevel::Log>(L"Scan file: " + filePath.wstring());
-									if (filePath.extension() == ".zip")
-									{
-										const auto zipFile = *OpenCvUtility::ReadToEnd(file.path());
-
-										zip_error_t error;
-										zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.length(), 0, &error);
-										if (src == nullptr && error.zip_err != ZIP_ER_OK)
-										{
-											Log.Write<LogLevel::Error>(std::wstring(L"load file: ") + file.path().wstring() + std::filesystem::path(error.str).wstring());
-											continue;
-										}
-
-										zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &error);
-										if (za == nullptr && error.zip_err != ZIP_ER_OK)
-										{
-											Log.Write<LogLevel::Error>(L"load file: " + file.path().wstring() + *Convert::ToWString(error.zip_err));
-											continue;
-										}
-
-										const auto entries = zip_get_num_entries(za, 0);
-										if (entries < 0)
-										{
-											Log.Write<LogLevel::Error>(L"load file: " + *Convert::ToWString(zip_get_error(za)->str));
-											zip_close(za);
-											continue;
-										}
-
-										for (int i = 0; i < entries; ++i)
-										{
-											struct zip_stat zs;
-											if (zip_stat_index(za, i, 0, &zs) == 0)
-											{
-												if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
-												{
-													auto* const zf = zip_fopen_index(za, i, 0);
-													if (zf == nullptr
-														&& zip_get_error(za)->zip_err != ZIP_ER_OK)
-													{
-														Log.Write<LogLevel::Error>(L"load file: zip_fopen_index: fail");
-														continue;
-													}
-													const auto buf = std::make_unique<char[]>(zs.size);
-													if (zip_fread(zf, buf.get(), zs.size) < 0)
-													{
-														Log.Write<LogLevel::Error>(L"load file: zip_fread: fail");
-														zip_fclose(zf);
-														continue;
-													}
-													img = ImageDatabase::Image(file.path() / filename, std::string(buf.get(), zs.size));
-													zip_fclose(zf);
-
-													sink = sink.resume();
-												}
-											}
-										}
-										zip_close(za);
-									}
-									else if (const auto ext = filePath.extension();
-										ext == ".gif" ||
-										ext == ".mp4" ||
-										ext == ".mkv" ||
-										ext == ".flv" ||
-										ext == ".avi" ||
-										ext == ".mpg" ||
-										ext == ".vob" ||
-										ext == ".mov" ||
-										ext == ".wmv" ||
-										ext == ".swf" ||
-										ext == ".3gp" ||
-										ext == ".mts" ||
-										ext == ".rm" ||
-										ext == ".ts" ||
-										ext == ".m2ts" ||
-										ext == ".rmvb" ||
-										ext == ".mpeg" ||
-										ext == ".webm")
-									{
-										std::string gifPath = filePath.u8string();
-
-										AVFormatContext* fmtCtx = nullptr;
-										AVCodec* codec = nullptr;
-										AVCodecContext* codecCtx = nullptr;
-										AVFrame* frame = nullptr;
-										AVFrame* decFrame = nullptr;
-										SwsContext* swsCtx = nullptr;
-
-										try
-										{
-											int ret;
-											ret = avformat_open_input(&fmtCtx, gifPath.c_str(), nullptr, nullptr);
-											if (ret < 0) throw std::runtime_error("avforamt_open_input fail: " + *Convert::ToString(ret));
-
-											ret = avformat_find_stream_info(fmtCtx, nullptr);
-											if (ret < 0) throw std::runtime_error("avformat_find_stream_info fail: " + *Convert::ToString(ret));
-
-											ret = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
-											if (ret < 0) throw std::runtime_error("av_find_best_stream fail: " + *Convert::ToString(ret));
-
-											const int streamId = ret;
-											auto codecParams = fmtCtx->streams[streamId]->codecpar;
-
-											codecCtx = avcodec_alloc_context3(codec);
-											if (!codecCtx) throw std::runtime_error("avcodec_alloc_context3 fail");
-
-											avcodec_parameters_to_context(codecCtx, codecParams);
-											ret = avcodec_open2(codecCtx, codec, nullptr);
-											if (ret < 0) throw std::runtime_error("avcodec_open2 fail: " + *Convert::ToString(ret));
-
-											const int dstWidth = codecParams->width;
-											const int dstHeight = codecParams->height;
-											const AVPixelFormat dstPixFmt = AV_PIX_FMT_BGR24;
-											if (codecCtx->pix_fmt != AV_PIX_FMT_NONE)
-											{
-												swsCtx = sws_getCachedContext(
-													nullptr, codecParams->width, codecParams->height, codecCtx->pix_fmt,
-													dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
-												if (!swsCtx) throw std::runtime_error("sws_getCachedContext fail");
-											}
-
-											frame = av_frame_alloc();
-											std::string frameBuf(av_image_get_buffer_size(dstPixFmt, dstWidth, dstHeight, dstWidth), 0);
-											av_image_fill_arrays(
-												frame->data, frame->linesize,
-												reinterpret_cast<uint8_t*>(frameBuf.data()),
-												dstPixFmt, dstWidth, dstHeight, dstWidth);
-						
-											decFrame = av_frame_alloc();
-											bool eof = false;
-											AVPacket* pkt = av_packet_alloc();
-											do
-											{
-												if (!eof)
-												{
-													ret = av_read_frame(fmtCtx, pkt);
-													if (ret < 0 && ret != AVERROR_EOF) throw std::runtime_error("av_read_frame fail: " + *Convert::ToString(ret));
-													
-													if (ret == 0 && pkt->stream_index != streamId)
-													{
-														av_packet_unref(pkt);
-														continue;
-													}
-													eof = (ret == AVERROR_EOF);
-												}
-												if (eof)
-												{
-													av_packet_unref(pkt);
-													ret = 0;
-												}
-												else {ret = avcodec_send_packet(codecCtx, pkt);
-												if (ret < 0) throw std::runtime_error("avcodec_send_packet: error sending a packet for decoding: " + *Convert::ToString(ret));
-												}
-												while (ret >= 0)
-												{
-													ret = avcodec_receive_frame(codecCtx, decFrame);
-													if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-													{
-														av_packet_unref(pkt);
-														break;
-													}
-													if (ret < 0) throw std::runtime_error("avcodec_receive_frame: error during decoding: " + *Convert::ToString(ret));
-
-													if (swsCtx == nullptr)
-													{
-														swsCtx = sws_getCachedContext(
-															nullptr, codecParams->width, codecParams->height, codecCtx->pix_fmt,
-															dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
-														if (!swsCtx) throw std::runtime_error("sws_getCachedContext fail");
-													}
-							
-													sws_scale(swsCtx, decFrame->data, decFrame->linesize, 0, decFrame->height, frame->data, frame->linesize);
-
-													cv::Mat image(dstHeight, dstWidth, CV_8UC3, (frameBuf.data()), frame->linesize[0]);
-													//cv::imshow("", image);
-													//cv::waitKey(0);
-													std::vector<uchar> rawData;
-													imencode(".bmp", image, rawData);
-													std::string dataStr;
-													std::copy_n(rawData.begin(), rawData.size(), std::back_inserter(dataStr));
-													rawData.clear();
-													rawData.shrink_to_fit();
-													const auto subPath = filePath / *Convert::ToString(codecCtx->frame_number);
-													Log.Write<LogLevel::Info>(L"load file: " + subPath.wstring());
-													img = ImageDatabase::Image(subPath, dataStr);
-													sink = sink.resume();
-												}
-												av_packet_unref(pkt);
-											} while (!eof);
-											av_packet_free(&pkt);
-										}
-										catch (const std::exception& ex)
-										{
-											Log.Write<LogLevel::Error>(*Convert::ToWString(ex.what()) + L": " + filePath.wstring());
-										}
-										if (decFrame != nullptr) av_frame_free(&decFrame);
-										if (frame != nullptr) av_frame_free(&frame);
-										if (codecCtx != nullptr) avcodec_free_context(&codecCtx);
-										if (fmtCtx != nullptr) avformat_close_input(&fmtCtx);
-										if (swsCtx != nullptr) sws_freeContext(swsCtx);
-									}
-									else if (OpenCvUtility::IsImage(filePath.extension().string()))
-									{
-										Log.Write<LogLevel::Info>(L"load file: " + file.path().wstring());
-										img = ImageDatabase::Image(file.path());
-										sink = sink.resume();
-									}
-									else
-									{
-										Log.Write<LogLevel::Warn>(L"Unsupported format: " + file.path().wstring());
-									}
-								}
-							}
-							img = ImageDatabase::Image{};
-							return std::move(sink);
-						});
-
-					for (uint64_t i = 0; !img.Path.empty(); source = source.resume(), ++i)
-					{
-						Log.Write<LogLevel::Info>(*Convert::ToWString(Convert::ToString(i)->c_str()) + L": compute md5: " + img.Path.wstring());
-						img.ComputeMd5();
-						Log.Write<LogLevel::Info>(L"compute vgg16: " + img.Path.wstring());
-						try
-						{
-							img.ComputeVgg16();
-							Log.Write<LogLevel::Info>(L"file: " + img.Path.wstring() + L": vgg16 start with: " + *Convert::ToWString(img.Vgg16[0]));
-						}
-						catch (const cv::Exception& ex)
-						{
-							Log.Write<LogLevel::Error>(L"compute vgg16: " + img.Path.wstring() + L": " + *Convert::ToWString(ex.what()));
-						}
-						img.FreeMemory();
-						db.Images.push_back(img);
 					}
 
-					Log.Write<LogLevel::Info>(L"save database: " + dbPath.wstring());
+					LogLog("save database: {}", dbPath.wstring());
 					db.Save(dbPath);
-					Log.Write<LogLevel::Info>(L"database size: " + *Convert::ToWString(Convert::ToString(db.Images.size())->c_str()));
+					LogLog("database size: {}", db.Images.size());
 				}},
 				{Operator::query, [&]()
 				{
 					const auto dbPath = args.Value(dbArg);
 					const auto input = args.Value(pathArg);
-					ImageDatabase db(dbPath);
-					Log.Write<LogLevel::Info>(L"load database: " + dbPath.wstring());
-					db.Load(dbPath);
-					Log.Write<LogLevel::Info>(L"database size: " + *Convert::ToWString(db.Images.size()));
+					const auto threshold = args.Value(thresholdArg);
 
-					Log.Write<LogLevel::Info>(L"load database: " + input.wstring());
-					ImageDatabase::Image img(input);
-					Log.Write<LogLevel::Info>(L"compute md5: " + input.wstring());
-					img.ComputeMd5();
-					Log.Write<LogLevel::Info>(L"compute vgg16: " + input.wstring());
-					img.ComputeVgg16();
-					Log.Write<LogLevel::Info>(L"file: " + img.Path.wstring() + L": vgg16 start with: " + *Convert::ToWString(img.Vgg16[0]));
-					img.FreeMemory();
+					LogInfo("load database: {}", dbPath.wstring());
+					ImageDatabase::Database db(dbPath);
+					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
 					
-					Log.Write<LogLevel::Info>(L"search start ...");
-					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [&](const ImageDatabase::Image& a, const ImageDatabase::Image& b)
+					LogInfo("database size: {}", db.Images.size());
+
+					LogInfo("load file: {}", input.wstring());
+					ImageDatabase::ImageFile file(input);
+					if (logLevel >= LogLevel::Debug) file.SetLog(LogForward);
+					const auto img = file.Images[0];
+
+					LogInfo("search start ...");
+
+					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [&](ImageDatabase::Image& a, ImageDatabase::Image& b)
 					{
-						return std::greater()(a.Vgg16.dot(img.Vgg16), b.Vgg16.dot(img.Vgg16));
+						if (a._Dot == 0) a._Dot = a.Vgg16.dot(img.Vgg16);
+						if (b._Dot == 0) b._Dot = b.Vgg16.dot(img.Vgg16);
+						return std::greater()(a._Dot, b._Dot);
 					});
 
-					Log.Write<LogLevel::Info>(L"search done.");
+					LogInfo("search done.");
 					for (const auto& i : db.Images)
 					{
-						if (const auto v = i.Vgg16.dot(img.Vgg16); v >= 0.8f)
+						if (const auto v = i._Dot; v >= threshold)
 						{
-							Log.Write<LogLevel::Log>(L"found " + std::filesystem::path(*Convert::ToString(v)).wstring() + L": " + i.Path.wstring());
+							LogLog("found '{}': {}", i.Path.wstring(), v);
 						}
 						else
 						{
@@ -619,10 +306,11 @@ int main(int argc, char* argv[])
 		}
 		catch (const std::exception& ex)
 		{
-			Log.Write<LogLevel::Error>(*Convert::ToWString(ex.what()));
+			LogErr(LogException(ex));
 		}
 
-		Log.Write<LogLevel::None>(L"{ok}.");
+		LogNone("{ok}.");
+
 		logThread.join();
 	}
 #ifdef CatchEx
