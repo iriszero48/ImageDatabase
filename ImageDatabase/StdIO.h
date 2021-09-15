@@ -4,7 +4,9 @@
 
 namespace Console
 {
-	namespace __detail
+	constexpr int Version[]{ 1, 0, 0, 0 };
+	
+	namespace __Detail
 	{
 		template<typename Stream, typename ...Args>
 		void StreamCombine(Stream& stream, Args&&...args)
@@ -22,13 +24,13 @@ namespace Console
 	template<typename ...Args>
 	void Write(Args&&...args)
 	{
-		__detail::StreamCombine(std::cout, std::forward<Args>(args)...);
+		__Detail::StreamCombine(std::cout, std::forward<Args>(args)...);
 	}
 
 	template<typename ...Args>
 	void WriteLine(Args&&...args)
 	{
-		__detail::StreamCombineLine(std::cout, std::forward<Args>(args)...);
+		__Detail::StreamCombineLine(std::cout, std::forward<Args>(args)...);
 	}
 
 	namespace Error
@@ -36,13 +38,13 @@ namespace Console
 		template<typename ...Args>
 		void Write(Args&&...args)
 		{
-			__detail::StreamCombine(std::cout, std::forward<Args>(args)...);
+			__Detail::StreamCombine(std::cout, std::forward<Args>(args)...);
 		}
 
 		template<typename ...Args>
 		void WriteLine(Args&&...args)
 		{
-			__detail::StreamCombineLine(std::cerr, std::forward<Args>(args)...);
+			__Detail::StreamCombineLine(std::cerr, std::forward<Args>(args)...);
 		}
 	}
 }

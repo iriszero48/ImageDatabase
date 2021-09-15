@@ -8,17 +8,9 @@
 #include <string>
 #include <chrono>
 
-#include <zip.h>
-#include <boost/context/continuation.hpp>
-
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
+extern "C"
+{
 #include <libavutil/avutil.h>
-#include <libavutil/imgutils.h>
-#include <libavutil/pixdesc.h>
-#include <libavutil/error.h>
-#include <libswscale/swscale.h>
 }
 
 #include "Arguments.h"
@@ -28,13 +20,23 @@ extern "C" {
 #include "Thread.h"
 #include "Log.h"
 #include "Algorithm.h"
-#include "File.h"
 #include "Requires.h"
 #include "Time.h"
+#include "Function.h"
 
-static_assert(Requires::Require(Requires::Version, {1, 0, 0, 0}));
-static_assert(Requires::Require(Algorithm::Version, {1, 0, 0, 0}));
-static_assert(Requires::Require(Bit::Version, {1, 0, 0, 0}));
+static_assert(Requires::Require(Requires::Version, { 1, 0, 0, 0 }));
+static_assert(Requires::Require(Algorithm::Version, { 1, 0, 0, 0 }));
+static_assert(Requires::Require(ArgumentsParse::Version, { 1, 0, 0, 0 }));
+static_assert(Requires::Require(Bit::Version, { 1, 0, 0, 0 }));
+static_assert(Requires::Require(Convert::Version, { 1, 0, 0, 0 }));
+static_assert(Requires::Require(Cryptography::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(File::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(Function::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(Serialization::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(Console::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(String::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(Thread::Version, { 1,0,0,0 }));
+static_assert(Requires::Require(Time::Version, { 1, 0, 0, 0 }));
 
 ArgumentOption(Operator, build, query)
 
@@ -58,23 +60,23 @@ static Logger<LogMsg> Log;
 #define LogInfo(...) LogImpl(LogLevel::Info, __VA_ARGS__)
 #define LogDebug(...) LogImpl(LogLevel::Debug, __VA_ARGS__)
 
-static void __LogException_Impl__(std::vector<std::string>& out, const std::exception& e, int level)
+static void LogExceptionImpl(std::vector<std::string>& out, const std::exception& e, const int level)
 {
 	out.push_back(String::FormatStr("{}{}", std::string(level * 2, ' '), e.what()));
 	try
 	{
 		std::rethrow_if_nested(e);
 	}
-	catch(const std::exception& e)
+	catch(const std::exception& ex)
 	{
-		__LogException_Impl__(out, e, level + 1);
+		LogExceptionImpl(out, ex, level + 1);
 	}
 }
 
 std::string LogException(const std::exception& e)
 {
 	std::vector<std::string> out{};
-	__LogException_Impl__(out, e, 0);
+	LogExceptionImpl(out, e, 0);
 	return String::JoinStr(out.begin(), out.end(), "\n");
 }
 
@@ -90,13 +92,12 @@ decltype(auto) LogTime(const decltype(LogMsg::Time)& time)
 
 int main(int argc, char* argv[])
 {
-#define ArgumentsFunc(arg) [&](decltype(arg)::ConvertFuncParamType value) -> decltype(arg)::ConvertResult
-	
+	const auto toStr = [](const auto& x) { return std::string(x); };
 	ArgumentsParse::Argument<Operator> opArg
 	{
 		"",
 		"operator " + OperatorDesc(),
-		ArgumentsFunc(opArg) { return { *ToOperator(std::string(value)), {} }; }
+		Function::Combine(toStr, ToOperator)
 	};
 	ArgumentsParse::Argument<std::filesystem::path> dbArg
 	{
@@ -112,12 +113,13 @@ int main(int argc, char* argv[])
 	{
 		"-t",
 		"threshold [0.0, 1.0] {0.8}",
-		0.8,
-		ArgumentsFunc(thresholdArg)
+		0.8f,
+		[](const auto& value)
 		{
 			const auto val = *Convert::FromString<float>(value);
-			if (!(val >= 0.0 && val <= 1.0)) return { std::nullopt, "range error" };
-			return { val, {} };
+			if (!(val >= 0.0f && val <= 1.0f))
+				throw ArgumentsParse::ConvertException(String::FormatStr("[main::thresholdArg::convert] [main.cpp:{}] range error", __LINE__));
+			return val;
 		}
 	};
 	ArgumentsParse::Argument<LogLevel> logLevelArg
@@ -125,23 +127,25 @@ int main(int argc, char* argv[])
 		"--loglevel",
 		"log level " + LogLevelDesc(ToString(LogLevel::Info)),
 		LogLevel::Info,
-		ArgumentsFunc(logLevelArg) { return { *ToLogLevel(std::string(value)), {} };	}
+		Function::Combine(toStr, ToLogLevel)
 	};
 	ArgumentsParse::Argument<std::filesystem::path> logFileArg
 	{
 		"--logfile",
-		"log level " + LogLevelDesc(ToString(LogLevel::Info)),
+		"log file path",
 		""
 	};
 #undef ArgumentsFunc
 	
-	ArgumentsParse::Arguments args;
-	args.Add(opArg);
-	args.Add(dbArg);
-	args.Add(pathArg);
-	args.Add(thresholdArg);
-	args.Add(logLevelArg);
-	args.Add(logFileArg);
+	auto args = ArgumentsParse::Arguments{}
+		.Add(opArg)
+		.Add(dbArg)
+		.Add(pathArg)
+		.Add(thresholdArg)
+		.Add(logLevelArg)
+		.Add(logFileArg);
+
+	const auto usage = [&]() { return String::FormatStr("Usage:\n{}\n{}", argv[0], args.GetDesc()); };
 
 #ifdef CatchEx
 	try
@@ -149,6 +153,14 @@ int main(int argc, char* argv[])
 	{
 		std::thread logThread;
 		args.Parse(argc, argv);
+
+		LogInfo("\n{}", args.GetValuesDesc({
+			args.GetValuesDescConverter<std::string>([](const auto& x) { return x; }),
+			args.GetValuesDescConverter<std::filesystem::path>([](const auto& x) { return x.string(); }),
+			args.GetValuesDescConverter<Operator>([](const auto& x) { return ToString(x); }),
+			args.GetValuesDescConverter<LogLevel>([](const auto& x) { return ToString(x); }),
+			args.GetValuesDescConverter<float>([](const auto& x) { return *Convert::ToString(x); }),
+		}));
 
 		const auto logLevel = args.Value(logLevelArg);
 
@@ -202,12 +214,13 @@ int main(int argc, char* argv[])
 				const auto [level, raw] = Log.Chan.Read();
 				const auto& [time, file, line, func, msg] = raw;
 
-				const auto out = String::FormatStr("[{}] [{}] [{}:{}] [{}] {}", ToString(level), LogTime(time), file, line, func, std::filesystem::path(msg).u8string());
+				const auto out = String::FormatWstr("[{}] [{}] [{}:{}] [{}] {}", ToString(level), LogTime(time), file, line, func, msg);
+				const auto outU8 = std::filesystem::path(out).u8string();
 
-				Console::WriteLine(out);
+				Console::WriteLine(outU8);
 				if (!logFile.empty())
 				{
-					fs << out << std::endl;
+					fs << outU8 << std::endl;
 					fs.flush();
 				}
 
@@ -234,8 +247,7 @@ int main(int argc, char* argv[])
 					const auto buildPath = args.Value(pathArg);
 
 					ImageDatabase::Database db{};
-					//if (logLevel >= LogLevel::Debug)
-					 db.SetLog(LogForward);
+					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
 
 					for (const auto& file : std::filesystem::recursive_directory_iterator(buildPath))
 					{
@@ -243,13 +255,20 @@ int main(int argc, char* argv[])
 						{
 							try
 							{
-								const auto filePath = file.path();
+								const auto& filePath = file.path();
 								LogInfo("load file '{}'", filePath.wstring());
 								ImageDatabase::ImageFile img(filePath);
-								//if (logLevel >= LogLevel::Debug) 
-								img.SetLog(LogForward);
-								std::copy(img.Images.begin(), img.Images.end(), std::back_inserter(db.Images));
-								LogInfo("image count: {}", img.Images.size());
+								if (logLevel >= LogLevel::Debug) img.SetLog(LogForward);
+								img.Parse();
+								uint64_t size = 0;
+								while (true)
+								{
+									const auto i = img.MessageQueue.Read();
+									if (i.Path.empty()) break;
+									db.Images.push_back(i);
+									++size;
+								}
+								LogInfo("image count: {}", size);
 							}
 							catch(const std::exception& e)
 							{
@@ -278,23 +297,21 @@ int main(int argc, char* argv[])
 					LogInfo("load file: {}", input.wstring());
 					ImageDatabase::ImageFile file(input);
 					if (logLevel >= LogLevel::Debug) file.SetLog(LogForward);
-					const auto img = file.Images[0];
+					file.WhiteList = { 0 };
+					const auto img = file.MessageQueue.Read();
 
 					LogInfo("search start ...");
 
-					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [&](ImageDatabase::Image& a, ImageDatabase::Image& b)
-					{
-						if (a._Dot == 0) a._Dot = a.Vgg16.dot(img.Vgg16);
-						if (b._Dot == 0) b._Dot = b.Vgg16.dot(img.Vgg16);
-						return std::greater()(a._Dot, b._Dot);
-					});
+					Algorithm::ForEach<true>(db.Images.begin(), db.Images.end(), [&](auto& x) { x.Dot = x.Vgg16.dot(img.Vgg16); });
+					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [](const auto& a, const auto& b)
+						{ return std::greater()(a.Dot, b.Dot); });
 
 					LogInfo("search done.");
-					for (const auto& i : db.Images)
+					for (const auto& [p, _, _unused, v] : db.Images)
 					{
-						if (const auto v = i._Dot; v >= threshold)
+						if (v >= threshold)
 						{
-							LogLog("found '{}': {}", i.Path.wstring(), v);
+							LogLog("found '{}': {}", p.wstring(), v);
 						}
 						else
 						{
@@ -307,6 +324,7 @@ int main(int argc, char* argv[])
 		catch (const std::exception& ex)
 		{
 			LogErr(LogException(ex));
+			LogLog(usage());
 		}
 
 		LogNone("{ok}.");
@@ -316,8 +334,8 @@ int main(int argc, char* argv[])
 #ifdef CatchEx
 	catch (const std::exception& e)
 	{
-		Console::Error::WriteLine(e.what());
-		Console::Error::WriteLine(args.GetDesc());
+		Console::Error::WriteLine(LogException(e));
+		Console::Error::WriteLine(usage());
 	}
 #endif
 }

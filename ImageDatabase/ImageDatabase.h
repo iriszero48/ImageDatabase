@@ -2,44 +2,47 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <string_view>
+#include <utility>
 #include <vector>
 #include <array>
-#include <numeric>
 #include <unordered_set>
-#include <filesystem>
 
 #include <eigen3/Eigen/Eigen>
-#include <zip.h>
 #include <opencv2/core.hpp>
-#include <opencv2/imgcodecs.hpp>
 #include <opencv2/dnn.hpp>
 
-extern "C" {
+extern "C"
+{
+#include <zip.h>
+	
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
-#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
 #include "Cryptography.h"
 #include "String.h"
 #include "File.h"
-#include "Enumerable.h"
 #include "Serialization.h"
 #include "Bit.h"
+#include "Thread.h"
 
 namespace ImageDatabase
 {
+	class Exception : public std::runtime_error
+	{
+		using std::runtime_error::runtime_error;
+	};
+	
 	namespace __Detail
 	{
 		class MemoryStream
 		{
 			public:
 				MemoryStream() = delete;
-				MemoryStream(uint8_t* data, const uint64_t size, bool keep = false): size(size), keep(keep)
+				MemoryStream(uint8_t* data, const uint64_t size, const bool keep = false): size(size), keep(keep)
 				{
 					if (keep)
 					{
@@ -52,43 +55,103 @@ namespace ImageDatabase
 					}
 				}
 
+				MemoryStream(const MemoryStream& ms)
+				{
+					this->size = ms.size;
+					if (ms.keep)
+					{
+						this->data = new uint8_t[this->size];
+						std::copy_n(ms.data, ms.size, this->data);
+					}
+					else
+					{
+						this->data = ms.data;
+					}
+					this->keep = ms.keep;
+					this->index = ms.index;
+				}
+
+				MemoryStream(MemoryStream&& ms) noexcept
+				{
+					this->size = ms.size;
+					this->data = ms.data;
+					ms.data = nullptr;
+					this->keep = ms.keep;
+					this->index = ms.index;
+				}
+
+				MemoryStream& operator=(const MemoryStream& ms)
+				{
+					if (this == &ms) return *this;
+					
+					this->size = ms.size;
+					if (ms.keep)
+					{
+						this->data = new uint8_t[this->size];
+						std::copy_n(ms.data, ms.size, this->data);
+					}
+					else
+					{
+						this->data = ms.data;
+					}
+					this->keep = ms.keep;
+					this->index = ms.index;
+					return *this;
+				}
+			
+				MemoryStream& operator=(MemoryStream&& ms) noexcept
+				{
+					if (this == &ms) return *this;
+					
+					this->size = ms.size;
+					this->data = ms.data;
+					ms.data = nullptr;
+					this->keep = ms.keep;
+					this->index = ms.index;
+					return *this;
+				}
+			
 				~MemoryStream()
 				{
 					if (keep) delete[] data;
 				}
 
-				uint64_t Size()
+				[[nodiscard]] uint64_t Size() const
 				{
 					return size;
 				}
 
-				int Read(unsigned char *buf, int buf_size)
+				int Read(unsigned char *buf, const int bufSize)
 				{
-					if (buf_size < 0) return buf_size;
+					if (bufSize < 0) return bufSize;
+					if (index >= size)
+						return AVERROR_EOF;
 					
-					if (index + buf_size >= size)
+					if (index + bufSize >= size)
 					{
 						const auto n = size - index;
 						std::copy_n(data + index, n, buf);
+						index += n;
 						return n;
 					}
 
-					std::copy_n(data + index, buf_size, buf);
-					return buf_size;
+					std::copy_n(data + index, bufSize, buf);
+					index += bufSize;
+					return bufSize;
 				}
 
-				int64_t Seek(int64_t offset, int whence)
+				int64_t Seek(const int64_t offset, const int whence)
 				{
-					if (whence == 0) // set
+					if (whence == SEEK_SET)
 					{
 						if (offset < 0) return -1;
 						index = offset;
 					}
-					else if (whence == 1) // cur
+					else if (whence == SEEK_CUR)
 					{
 						index += offset;
 					}
-					else if (whence == 2) // end
+					else if (whence == SEEK_END)
 					{
 						if (offset > 0) return -1;
 						index = size + offset;
@@ -107,87 +170,100 @@ namespace ImageDatabase
 				uint64_t index = 0;
 		};
 
-		class my_iocontext_private
+		class MemoryStreamIoContext
 		{
 			static const auto BufferSize = 4096;
-		private:
-			my_iocontext_private(my_iocontext_private const &);
-			my_iocontext_private& operator = (my_iocontext_private const &);
 
 		public:
-			my_iocontext_private(MemoryStream inputStream)
-			: inputStream_(inputStream)
-			, buffer_(static_cast<unsigned char*>(::av_malloc(BufferSize))) {
-			ctx_ = avio_alloc_context(buffer_, BufferSize, 0, this,
-				&my_iocontext_private::read, NULL, &my_iocontext_private::seek); 
+			MemoryStreamIoContext(MemoryStreamIoContext const&) = delete;
+			MemoryStreamIoContext& operator = (MemoryStreamIoContext const&) = delete;
+			MemoryStreamIoContext(MemoryStreamIoContext&&) = delete;
+			MemoryStreamIoContext& operator = (MemoryStreamIoContext&&) = delete;
+			
+			MemoryStreamIoContext(MemoryStream inputStream):
+				inputStream(std::move(inputStream)),
+				buffer(static_cast<unsigned char*>(av_malloc(BufferSize)))
+			{
+				if (buffer == nullptr)
+					throw Exception("[ImageDatabase::__Detail::MemoryStreamIoContext::MemoryStream] [av_malloc] the buffer cannot be allocated");
+				
+				ctx = avio_alloc_context(buffer, BufferSize, 0, this,
+					&MemoryStreamIoContext::Read, nullptr, &MemoryStreamIoContext::Seek);
+				if (ctx == nullptr)
+					throw Exception("[ImageDatabase::__Detail::MemoryStreamIoContext::MemoryStream] [avio_alloc_context] the AVIO cannot be allocated");
 			}
 
-			~my_iocontext_private() { 
-				av_free(ctx_);
-				av_free(buffer_); 
+			~MemoryStreamIoContext()
+			{
+				av_free(ctx); 
 			}
 
-			void reset_inner_context() { ctx_ = NULL; buffer_ = NULL; }
-
-			static int read(void *opaque, unsigned char *buf, int buf_size) {
-				my_iocontext_private* h = static_cast<my_iocontext_private*>(opaque);
-				return h->inputStream_.Read(buf, buf_size); 
+			void ResetInnerContext()
+			{
+				ctx = nullptr;
+				buffer = nullptr;
 			}
 
-			static int64_t seek(void *opaque, int64_t offset, int whence) {
-				my_iocontext_private* h = static_cast<my_iocontext_private*>(opaque);
+			static int Read(void *opaque, unsigned char *buf, const int bufSize)
+			{
+				auto h = static_cast<MemoryStreamIoContext*>(opaque);
+				return h->inputStream.Read(buf, bufSize); 
+			}
+
+			static int64_t Seek(void *opaque, const int64_t offset, const int whence) {
+				auto h = static_cast<MemoryStreamIoContext*>(opaque);
 
 				if (0x10000 == whence)
-					return h->inputStream_.Size();
+					return h->inputStream.Size();
 
-				return h->inputStream_.Seek(offset, whence); 
+				return h->inputStream.Seek(offset, whence); 
 			}
 
-			::AVIOContext *get_avio() { return ctx_; }
+			[[nodiscard]] AVIOContext *GetAvio() const
+			{
+				return ctx;
+			}
 
 			private:
-			MemoryStream inputStream_; // abstract stream interface, You can adapt it to TMemoryStream  
-			unsigned char * buffer_;  
-			::AVIOContext * ctx_;
+			MemoryStream inputStream;
+			unsigned char* buffer = nullptr;
+			AVIOContext* ctx = nullptr;
 		};
 
-		std::string FFmpegToString(int err)
+		std::string FFmpegToString(const int err)
 		{
 			char buf[4096]{0};
-			const auto ret = av_strerror(err, buf, 4096);
-			if (ret < 0) return String::FormatStr("unknow error code {}", ret);
+			if (const auto ret = av_strerror(err, buf, 4096); ret < 0)
+				return String::FormatStr("unknow error code {}", ret);
 			return std::string(buf);
 		}
 	}
-
-	class Exception: public std::runtime_error
-	{
-		using std::runtime_error::runtime_error;
-	};
 
 	struct Image
 	{
 		std::filesystem::path Path{};
 		std::array<char, 32> Md5{};
-		Eigen::Matrix<float, 512, 1> Vgg16;
-		float _Dot;
+		Eigen::Matrix<float, 512, 1> Vgg16{};
+		float Dot{0};
 	};
 
 	struct ImageFile
 	{
 		std::filesystem::path Path{};
-		std::vector<Image> Images{};
+		Thread::Channel<Image> MessageQueue{};
+		std::unordered_set<uint64_t> WhiteList{};
 
 		ImageFile() = delete;
 
-		ImageFile(const std::filesystem::path& path)
-		{
-			const auto ext = path.extension().u8string();
-			static const std::unordered_set<std::string> CompExt { ".zip", ".7z", ".rar", ".gz", ".xz" };
+		ImageFile(const std::filesystem::path& path) : Path(path) {}
 
-			if (CompExt.find(ext) != CompExt.end())
+		void Parse()
+		{
+			const auto ext = Path.extension().u8string();
+
+			if (static const std::unordered_set<std::string> CompExt{ ".zip", ".7z", ".rar", ".gz", ".xz" }; CompExt.find(ext) != CompExt.end())
 			{
-				const auto zipFile = File::ReadToEnd(path);
+				const auto zipFile = File::ReadToEnd(Path);
 
 				std::string errLog;
 				zip_error_t error;
@@ -209,7 +285,7 @@ namespace ImageDatabase
 
 				for (int i = 0; i < entries; ++i)
 				{
-					struct zip_stat zs;
+					struct zip_stat zs {};
 					if (zip_stat_index(za, i, 0, &zs) == 0)
 					{
 						if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
@@ -218,17 +294,15 @@ namespace ImageDatabase
 							if (const auto err = zip_get_error(za)->zip_err; zf == nullptr && err != ZIP_ER_OK)
 								throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_fopen_index] {}", err));
 
-							//const auto buf = std::make_unique<char[]>(zs.size);
 							std::string buf(zs.size, 0);
-							
+
 							if (const auto ret = zip_fread(zf, &buf[0], zs.size); ret < 0)
 							{
 								zip_fclose(zf);
 								throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_fread] {}", ret));
 							}
 
-							LoadFile(path / filename, std::string_view(buf.data(), zs.size));
-							//Images.emplace_back(path / filename, buf);
+							LoadFile(Path / filename, std::string_view(buf.data(), zs.size));
 
 							zip_fclose(zf);
 						}
@@ -238,44 +312,43 @@ namespace ImageDatabase
 			}
 			else
 			{
-				LoadFile(path);
-				//Images.emplace_back(path);
+				LoadFile(Path);
 			}
 		}
 
-		void SetLog(const std::function<void(std::string)>& callback)
+		void SetLog(void(*callback)(const std::string&))
 		{
 			log = callback;
-		};
+		}
 
 	private:
-		std::optional<std::function<void(std::string)>> log = std::nullopt;
+		void(*log)(const std::string&) = nullptr;
 
 		void LoadFile(const std::filesystem::path& path)
 		{
 			AVFormatContext* fmtCtx = nullptr;
-			int ret = avformat_open_input(&fmtCtx, path.u8string().c_str(), nullptr, nullptr);
-			if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(1)] [avforamt_open_input] {}",  __Detail::FFmpegToString(ret)));
+			if (const int ret = avformat_open_input(&fmtCtx, path.u8string().c_str(), nullptr, nullptr); ret < 0)
+				throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(1)] [avforamt_open_input] {}",  __Detail::FFmpegToString(ret)));
 
 			LoadImage(path, fmtCtx);
 
-			if (fmtCtx != nullptr) avformat_close_input(&fmtCtx);
+			avformat_close_input(&fmtCtx);
 		}
 
 		void LoadFile(const std::filesystem::path& path, const std::string_view& data)
 		{
 			__Detail::MemoryStream ms((uint8_t*)data.data(), data.length(), false);
 
-			__Detail::my_iocontext_private priv_ctx(ms);
+			__Detail::MemoryStreamIoContext privCtx(ms);
 			AVFormatContext* ctx = avformat_alloc_context();
-			ctx->pb = priv_ctx.get_avio();
+			ctx->pb = privCtx.GetAvio();
 
-			int ret = avformat_open_input(&ctx, NULL, NULL, NULL);
-			if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(2)] [avforamt_open_input] {}",  ret));
+			if (int ret = avformat_open_input(&ctx, nullptr, nullptr, nullptr); ret < 0)
+				throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(2)] [avforamt_open_input] {}",  ret));
 
 			LoadImage(path, ctx);
 
-			if (ctx != nullptr) avformat_close_input(&ctx);
+			avformat_close_input(&ctx);
 		}
 		
 		void LoadImage(const std::filesystem::path& path, AVFormatContext* fmtCtx)
@@ -288,16 +361,14 @@ namespace ImageDatabase
 
 			try
 			{
-				int ret;
-
-				ret = avformat_find_stream_info(fmtCtx, nullptr);
+				int ret = avformat_find_stream_info(fmtCtx, nullptr);
 				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avformat_find_stream_info] {}", ret));
 
 				ret = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
 				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_find_best_stream] {}", ret));
 
 				const int streamId = ret;
-				auto codecParams = fmtCtx->streams[streamId]->codecpar;
+				const auto codecParams = fmtCtx->streams[streamId]->codecpar;
 
 				codecCtx = avcodec_alloc_context3(codec);
 				if (!codecCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [avcodec_alloc_context3] NULL");
@@ -308,8 +379,8 @@ namespace ImageDatabase
 				ret = avcodec_open2(codecCtx, codec, nullptr);
 				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_open2] {}", ret));
 
-				constexpr auto dstWidth = 224; //codecParams->width;
-				constexpr auto dstHeight = 224; //codecParams->height;
+				constexpr auto dstWidth = 224;
+				constexpr auto dstHeight = 224;
 				constexpr AVPixelFormat dstPixFmt = AV_PIX_FMT_BGR24;
 
 				if (codecCtx->pix_fmt != AV_PIX_FMT_NONE)
@@ -326,7 +397,7 @@ namespace ImageDatabase
 				const auto frameSize = av_image_get_buffer_size(dstPixFmt, dstWidth, dstHeight, dstWidth);
 				if (frameSize < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_image_get_buffer_size] {}", frameSize));
 
-				std::string frameBuf(av_image_get_buffer_size(dstPixFmt, dstWidth, dstHeight, dstWidth), 0);
+				std::string frameBuf(frameSize, 0);
 				ret = av_image_fill_arrays(
 					frame->data, frame->linesize,
 					reinterpret_cast<uint8_t*>(frameBuf.data()),
@@ -347,6 +418,11 @@ namespace ImageDatabase
 					if (!eof)
 					{
 						ret = av_read_frame(fmtCtx, pkt);
+						if (!WhiteList.empty() && WhiteList.find(index) != WhiteList.end())
+						{
+							++index;
+							continue;
+						}
 						if (ret < 0 && ret != AVERROR_EOF) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_read_frame] {}", ret));
 						
 						if (ret == 0 && pkt->stream_index != streamId)
@@ -383,10 +459,10 @@ namespace ImageDatabase
 								dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
 							if (!swsCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [sws_getCachedContext] NULL");
 						}
-											
+						
 						sws_scale(swsCtx, decFrame->data, decFrame->linesize, 0, decFrame->height, frame->data, frame->linesize);
 
-						Images.push_back(ProcImage(path / *Convert::ToString(index++), frameBuf, frame->linesize[0]));
+						MessageQueue.Write(ProcImage(path / *Convert::ToString(index++), frameBuf, frame->linesize[0]));
 					}
 					av_packet_unref(pkt);
 				} while (!eof);
@@ -394,30 +470,33 @@ namespace ImageDatabase
 			}
 			catch (...)
 			{
-				if (decFrame != nullptr) av_frame_free(&decFrame);
-				if (frame != nullptr) av_frame_free(&frame);
-				if (codecCtx != nullptr) avcodec_free_context(&codecCtx);
-				if (swsCtx != nullptr) sws_freeContext(swsCtx);
+				av_frame_free(&decFrame);
+				av_frame_free(&frame);
+				avcodec_free_context(&codecCtx);
+				sws_freeContext(swsCtx);
+				MessageQueue.Write({});
 				std::throw_with_nested(Exception("[ImageDatabase::ImageFile::LoadImage] load image failed"));
 			}
 
-			if (decFrame != nullptr) av_frame_free(&decFrame);
-			if (frame != nullptr) av_frame_free(&frame);
-			if (codecCtx != nullptr) avcodec_free_context(&codecCtx);
-			if (swsCtx != nullptr) sws_freeContext(swsCtx);
+			av_frame_free(&decFrame);
+			av_frame_free(&frame);
+			avcodec_free_context(&codecCtx);
+			sws_freeContext(swsCtx);
+			MessageQueue.Write({});
 		}
 
-		Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int linesize)
+		Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int lineSize) const
 		{
 			Image out{};
 			out.Path = path;
-			if (log.has_value()) (*log)(path.u8string());
+			if (log != nullptr)
+				log(path.u8string());
 
 			Cryptography::Md5 md5{};
 			md5.Append((uint8_t*)buf.data(), buf.length());
 			const std::string md5Str = md5.Digest();
 			std::copy_n(md5Str.begin(), 32, out.Md5.begin());
-			if (log.has_value()) (*log)(md5Str);
+			if (log != nullptr) log(md5Str);
 
 			static const auto LoadFile = [](const char* file)
 			{
@@ -430,35 +509,36 @@ namespace ImageDatabase
 					std::throw_with_nested(
 						Exception(
 							String::FormatStr(
-								"[ImageDatabase::ImageFile::ProcImage::LoadFile] [File::ReadToEnd] init '{}' fail",
+								"[ImageDatabase::ImageFile::ProcImage::loadFile] [File::ReadToEnd] init '{}' fail",
 								file)));
 				}
 			};
 
-			static std::string ProtoTxt = LoadFile("vgg16-deploy.prototxt");
-			static std::string CaffeModel = LoadFile("vgg16.caffemodel");
+			static std::string protoTxt = LoadFile("vgg16-deploy.prototxt");
+			static std::string caffeModel = LoadFile("vgg16.caffemodel");
 
 			static auto vgg16 = []()
 			{
 				auto vgg16 = cv::dnn::readNetFromCaffe(
-					ProtoTxt.data(), ProtoTxt.length(),
-					CaffeModel.data(), CaffeModel.length());
-				vgg16.setPreferableBackend(cv::dnn::DNN_BACKEND_VKCOM);
-				vgg16.setPreferableTarget(cv::dnn::DNN_TARGET_VULKAN);
+					protoTxt.data(), protoTxt.length(),
+					caffeModel.data(), caffeModel.length());
+				vgg16.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
+				vgg16.setPreferableTarget(cv::dnn::DNN_TARGET_OPENCL);
 				return vgg16;
 			}();
-			
-			cv::Mat image(224, 224, CV_8UC3, (void*)buf.data(), linesize);
 
+			const cv::Mat image(224, 224, CV_8UC3, (void*)buf.data(), lineSize);
+			//cv::imshow("", image);
+			//cv::waitKey(0);
 			vgg16.setInput(cv::dnn::blobFromImage(image));
 			auto feat = vgg16.forward();
 			feat = feat / norm(feat);
 
 			for (int i = 0; i < 512; ++i)
 			{
-				out.Vgg16(i, 0) = feat.at<float>(0, i, 0);
+				out.Vgg16(i, 0) = feat.template at<float>(0, i, 0);
 			}
-			if (log.has_value()) (*log)(*Convert::ToString(out.Vgg16(0, 0)));
+			if (log != nullptr) log(*Convert::ToString(out.Vgg16(0, 0)));
 
 			return out;
 		}
@@ -474,19 +554,19 @@ namespace ImageDatabase
 			Load(this->path);
 		}
 
-		void Load(const std::filesystem::path& path)
+		void Load(const std::filesystem::path& dbPath)
 		{
-			std::ifstream fs(path, std::ios::in | std::ios::binary);
+			std::ifstream fs(dbPath, std::ios::in | std::ios::binary);
 			if (!fs) throw Exception("[ImageDatabase::Database::Load]");
-			const auto fsbuf = std::make_unique<char[]>(4096);
-			fs.rdbuf()->pubsetbuf(fsbuf.get(), 4096);
+			const auto fsBuf = std::make_unique<char[]>(4096);
+			fs.rdbuf()->pubsetbuf(fsBuf.get(), 4096);
 
-			Serialization::Unserialize unser(fs);
+			Serialization::Deserialize deser(fs);
 			while (fs)
 			{
 				Image img{};
 
-				const auto [p] = unser.Read<std::string>();
+				const auto [p] = deser.Read<std::string>();
 				if (fs.gcount() == 0) break;
 				img.Path = std::filesystem::u8path(p);
 				if (log.has_value()) (*log)(img.Path.u8string());
@@ -494,7 +574,7 @@ namespace ImageDatabase
 				fs.read(img.Md5.data(), 32);
 				if (log.has_value()) (*log)(std::string(img.Md5.data(), 32));
 
-				fs.read((char*)img.Vgg16.data(), sizeof(float) * 512);
+				fs.read(reinterpret_cast<char*>(img.Vgg16.data()), sizeof(float) * 512);
 				if constexpr (Bit::Endian::Native == Bit::Endian::Big)
 				{
 					auto ptr = img.Vgg16.data();
@@ -511,27 +591,38 @@ namespace ImageDatabase
 			fs.close();
 		}
 
-		void Save(const std::filesystem::path& path)
+		static void SaveImage(std::ofstream& fs, const Image& img)
 		{
-			std::filesystem::remove(path);
-			
-			std::ofstream fs(path, std::ios::out | std::ios::binary);
-			if (!fs) throw std::runtime_error("load file: bad stream");
-			const auto fsbuf = std::make_unique<char[]>(4096);
-			fs.rdbuf()->pubsetbuf(fsbuf.get(), 4096);
-
 			Serialization::Serialize ser(fs);
-			for (auto img : Images)
+			const auto& [path, md5, vgg16, Dot] = img;
+			ser.Write(path.u8string());
+			fs.write(md5.data(), 32);
+			fs.write(reinterpret_cast<const char*>(vgg16.data()), sizeof(float) * 512);
+		}
+
+		void Save()
+		{
+			Save(path);
+		}
+		
+		void Save(const std::filesystem::path& savePath)
+		{
+			std::filesystem::remove(savePath);
+			
+			std::ofstream fs(savePath, std::ios::out | std::ios::binary);
+			if (!fs) throw std::runtime_error("load file: bad stream");
+			const auto fsBuf = std::make_unique<char[]>(4096);
+			fs.rdbuf()->pubsetbuf(fsBuf.get(), 4096);
+
+			for (const auto& img : Images)
 			{
-				ser.Write(img.Path.u8string());
-				fs.write(img.Md5.data(), 32);
-				fs.write((char*)img.Vgg16.data(), sizeof(float) * 512);
+				SaveImage(fs, img);
 			}
 
 			fs.close();
 		}
 
-		void SetLog(const std::function<void(std::string)>& callback)
+		void SetLog(void(*callback)(const std::string&))
 		{
 			log = callback;
 		}

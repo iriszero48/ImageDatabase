@@ -1,10 +1,14 @@
 #pragma once
 
 #include <filesystem>
-#include <thread>
 
 #include "Arguments.h"
 #include "Thread.h"
+
+static_assert(Thread::Version[0] == 1 && Thread::Version[1] == 0 && Thread::Version[2] == 0 && Thread::Version[3] == 0);
+static_assert(ArgumentsParse::Version[0] == 1 && ArgumentsParse::Version[1] == 0 && ArgumentsParse::Version[2] == 0 && ArgumentsParse::Version[3] == 0);
+
+constexpr int Version[]{ 1, 0, 0, 0 };
 
 ArgumentOptionHpp(LogLevel, None, Error, Warn, Log, Info, Debug)
 

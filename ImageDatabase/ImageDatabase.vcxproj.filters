@@ -27,7 +27,7 @@
     <ClCompile Include="Log.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="OpenCvUtility.cpp">
+    <ClCompile Include="File.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
@@ -44,9 +44,6 @@
     <ClInclude Include="ImageDatabase.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="OpenCvUtility.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="StdIO.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -60,6 +57,27 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="Algorithm.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Time.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Bit.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Compression.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="File.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Requires.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Serialization.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Function.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

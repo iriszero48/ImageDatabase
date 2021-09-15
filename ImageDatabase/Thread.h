@@ -8,6 +8,8 @@
 
 namespace Thread
 {
+    constexpr int Version[]{ 1, 0, 0, 0 };
+	
     template<typename Func>
     struct Synchronize
     {
@@ -40,7 +42,7 @@ namespace Thread
         {
             std::unique_lock lock(mtx);
             cv.wait(lock, [&]() { return !buffer.empty(); });
-            const auto item = buffer.front();
+            auto item = buffer.front();
             buffer.pop_front();
             return item;
         }
@@ -61,14 +63,14 @@ namespace Thread
     {
         struct Node
         {
-            T data;
-            Node* next;
+            T Data;
+            Node* Next;
         };
 
         struct TagNode
         {
-            int tag;
-            Node* head;
+            int Tag;
+            Node* Head;
         };
 
         std::atomic<TagNode> head = TagNode{ 0, nullptr };
@@ -78,11 +80,11 @@ namespace Thread
             TagNode next = TagNode{};
             TagNode orig = head.load(std::memory_order_relaxed);
             Node* node = new Node{};
-            node->data = value;
+            node->Data = value;
             do {
-                node->next = orig.head;
-                next.head = node;
-                next.tag = orig.tag + 1;
+                node->Next = orig.Head;
+                next.Head = node;
+                next.Tag = orig.Tag + 1;
             } while (!head.compare_exchange_weak(orig, next,
                 std::memory_order_release,
                 std::memory_order_relaxed));
@@ -93,14 +95,14 @@ namespace Thread
             TagNode next = TagNode{};
             TagNode orig = head.load(std::memory_order_relaxed);
             do {
-                if (orig.head == nullptr) return std::nullopt;
-                next.head = orig.head->next;
-                next.tag = orig.tag + 1;
+                if (orig.Head == nullptr) return std::nullopt;
+                next.Head = orig.Head->Next;
+                next.Tag = orig.Tag + 1;
             } while (!head.compare_exchange_weak(orig, next,
                 std::memory_order_release,
                 std::memory_order_relaxed));
-            const auto res = orig.head->data;
-            delete orig.head;
+            const auto res = orig.Head->Data;
+            delete orig.Head;
             return res;
         }
     };

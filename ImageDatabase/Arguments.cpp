@@ -2,14 +2,15 @@
 
 #include <algorithm>
 #include <queue>
+#include <numeric>
 
-#define __Arguments_ToStringFunc__(x) #x
-#define __Arguments_ToString__(x) __Arguments_ToStringFunc__(x)
-#define __Arguments_Line__ __Arguments_ToString__(__LINE__)
-#define __Arguments_ThrowEx__(...) throw std::runtime_error(__Arguments_Combine__( __FILE__ ": " __Arguments_Line__ ":\n", __VA_ARGS__))
+template<class... Ts> struct Visitor : Ts... { using Ts::operator()...; };
+template<class... Ts> Visitor(Ts...)->Visitor<Ts...>;
 
 namespace ArgumentsParse
 {
+	static_assert(Version[0] == 1 && Version[1] == 0 && Version[2] == 0 && Version[3] == 0);
+	
 	std::string Arguments::GetDesc()
 	{
 		std::priority_queue<std::string, std::vector<std::string>, std::greater<>> item{};
@@ -18,15 +19,53 @@ namespace ArgumentsParse
 			args.begin(),
 			args.end(),
 			std::back_inserter(lens),
-			[&](const std::pair<std::string, IArgument*>& x) { item.push(x.first); return x.first.length(); });
+			[&](const std::pair<std::string, __Detail::IArgument*>& x)
+			{
+				item.push(x.first); return x.first.length();
+			});
 		const auto maxLen = *std::max_element(lens.begin(), lens.end()) + 1;
 		std::ostringstream ss;
 		while (!item.empty())
 		{
 			const auto i = item.top();
-			ss << __Arguments_Combine__(
+			ss << __Detail::StringCombine(
 				i, std::string(maxLen - i.length(), ' '),
 				args.at(i)->GetDesc(), "\n");
+			item.pop();
+		}
+		return ss.str();
+	}
+	std::string Arguments::GetValuesDesc(
+		const std::unordered_map<std::type_index, std::function<std::string(std::any const&)>>& map)
+	{
+		std::priority_queue<std::string, std::vector<std::string>, std::greater<>> item{};
+		std::vector<std::string::size_type> lens{};
+		for (const auto& [k, _] : args)
+		{
+			if (!args[k]->Empty())
+			{
+				item.emplace(k);
+				lens.push_back(k.length());
+			}
+		}
+		const auto maxLen = *std::max_element(lens.begin(), lens.end());
+		std::ostringstream ss;
+		while (!item.empty())
+		{
+			const auto i = item.top();
+			const auto vAny = args[i]->Get();
+			ss << __Detail::StringCombine("Arguments [info]: ",
+				i, std::string(maxLen - i.length(), ' '), ": ");
+			std::string v;
+			try
+			{
+				ss << map.at(vAny.type())(vAny);
+			}
+			catch (...)
+			{
+				ss << "unregistered type " << vAny.type().name();
+			}
+			ss << "\n";
 			item.pop();
 		}
 		return ss.str();
@@ -34,16 +73,17 @@ namespace ArgumentsParse
 
 	void Arguments::Parse(const int argc, char** argv)
 	{
-		if (argc < 2)
+		if (argc < 2 && std::none_of(args.begin(), args.end(),
+			[](const auto& x){ return x.second->Empty(); }) )
 		{
-			__Arguments_ThrowEx__(argv[0], " [options]");
+			throw __Arguments_Ex__(
+				Exception, "ArgumentsParse::Arguments::Parse", "An option must be specified");
 		}
-#define UnrecognizedOption(...) __Arguments_ThrowEx__("Unrecognized option: ", __VA_ARGS__)
-#define MissingArgument(...) __Arguments_ThrowEx__("Missing argument for option: ", __VA_ARGS__)
+
 		for (auto i = 1; i < argc; ++i)
 		{
 			auto pos = args.find(argv[i]);
-			ArgLengthType def = 0;
+			__Detail::ArgLengthType def = 0;
 			if (pos == args.end())
 			{
 				pos = args.find("");
@@ -51,10 +91,10 @@ namespace ArgumentsParse
 			}
 			if (pos != args.end())
 			{
-				const auto len = pos->second->GetArgLength();
-				if (len + i - def < argc)
+				if (const auto len = pos->second->GetArgLength(); len + i - def < argc)
 				{
-					auto setValue = [&]() -> IArgument::SetValueType {
+					auto setValue = [&]() -> __Detail::IArgument::ParseValueType
+					{
 						switch (len)
 						{
 						case 0:
@@ -63,29 +103,48 @@ namespace ArgumentsParse
 							return { argv[i + 1 - def] };
 						default:
 							std::vector<std::string_view> values{};
-							for (auto j = 0; j < len; ++j)
+							for (__Detail::ArgLengthType j = 0; j < len; ++j)
 							{
 								values.emplace_back(argv[i + j + 1 - def]);
 							}
 							return { values };
 						}
 					}();
-					pos->second->Set(setValue);
+					try
+					{
+						pos->second->Set(setValue);
+					}
+					catch (...)
+					{
+						std::throw_with_nested(__Arguments_Ex__(Exception,
+							"ArgumentsParse::Arguments::Parse", "invalid data '", std::visit(Visitor {
+								[](__Detail::ParseValueTypeImpl<0>::Type)
+									-> std::string { return std::string("std::nullopt"); },
+								[](const __Detail::ParseValueTypeImpl<1>::Type& val)
+									-> std::string { return std::string(val); },
+								[](const __Detail::ParseValueTypeImpl<2>::Type& val)
+									-> std::string { return
+										std::accumulate(val.begin(), val.end(), std::string{},
+											[](auto& s, const auto& v) { return s + ";" + std::string(v); }); }
+						}, setValue) , "' found when processing arg '", pos->first, "'"));
+					}
 					i += len - def;
 				}
 				else
 				{
-					MissingArgument(argv[i]);
+					throw __Arguments_Ex__(Exception,
+						"ArgumentsParse::Arguments::Parse", "missing argument for option '", argv[i], "'");
 				}
 			}
 			else
 			{
-				UnrecognizedOption(argv[i]);
+				throw __Arguments_Ex__(Exception,
+					"ArgumentsParse::Arguments::Parse", "unrecognized option '", argv[i], "'");
 			}
 		}
 	}
 
-	IArgument* Arguments::operator[](const std::string& arg)
+	__Detail::IArgument* Arguments::operator[](const std::string& arg)
 	{
 		return args.at(arg);
 	}

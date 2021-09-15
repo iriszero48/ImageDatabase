@@ -162,21 +162,27 @@
   <ItemGroup>
     <ClCompile Include="Arguments.cpp" />
     <ClCompile Include="Cryptography.cpp" />
+    <ClCompile Include="File.cpp" />
     <ClCompile Include="Log.cpp" />
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="OpenCvUtility.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Algorithm.h" />
     <ClInclude Include="Arguments.h" />
+    <ClInclude Include="Bit.h" />
+    <ClInclude Include="Compression.h" />
     <ClInclude Include="Convert.h" />
     <ClInclude Include="Cryptography.h" />
+    <ClInclude Include="File.h" />
+    <ClInclude Include="Function.h" />
     <ClInclude Include="ImageDatabase.h" />
     <ClInclude Include="Log.h" />
-    <ClInclude Include="OpenCvUtility.h" />
+    <ClInclude Include="Requires.h" />
+    <ClInclude Include="Serialization.h" />
     <ClInclude Include="StdIO.h" />
     <ClInclude Include="String.h" />
     <ClInclude Include="Thread.h" />
+    <ClInclude Include="Time.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
