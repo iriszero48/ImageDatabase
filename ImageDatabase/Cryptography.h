@@ -2,12 +2,11 @@
 
 #include <string>
 #include <iostream>
-#include <algorithm>
 #include <execution>
 #include <climits>
 
 namespace __Detail
-{
+{	
 	namespace Bit
 	{
 		enum class Endian
@@ -84,6 +83,8 @@ namespace __Detail
 
 namespace Cryptography
 {
+	constexpr int Version[]{ 1, 0, 0, 0 };
+	
 	template<typename ValueType>
 	class Hash
 	{

@@ -26,19 +26,19 @@
 
 namespace String
 {
-    constexpr auto Version = "1.0.0";
+	constexpr int Version[]{ 1, 0, 0, 0 };
 
 	namespace __Detail
 	{
 		template<class, class = void> struct HasValueType : std::false_type {};
 		template<class T> struct HasValueType<T, std::void_t<typename T::value_type>> : std::true_type {};
 
-		template<class T, typename toMatch>
+		template<class T, typename ToMatch>
 		struct IsCString
 		: std::integral_constant<
 			bool,
-			std::is_same<toMatch const *, typename std::decay<T>::type>::value ||
-			std::is_same<toMatch *, typename std::decay<T>::type>::value
+			std::is_same<ToMatch const *, typename std::decay<T>::type>::value ||
+			std::is_same<ToMatch *, typename std::decay<T>::type>::value
 		> {};
 
 		template<typename T>
@@ -56,8 +56,7 @@ namespace String
 			{
 				constexpr auto bufSiz = 65;
 				char buf[bufSiz]{0};
-				const auto [p, e] = std::to_chars(buf, buf + bufSiz, t);
-				if (e != std::errc{}) throw std::runtime_error("ToStringImpl error: invalid literal: " + std::string(p));
+				if (const auto [p, e] = std::to_chars(buf, buf + bufSiz, t); e != std::errc{}) throw std::runtime_error("ToStringImpl error: invalid literal: " + std::string(p));
 				return buf;
 			}
 			else if constexpr (std::is_floating_point_v<T>)
@@ -106,13 +105,13 @@ namespace String
 		}
 
 		template<typename T> struct GetStrFunc{};
-		template<> struct GetStrFunc<std::string> { decltype(auto) operator()(const std::filesystem::path& str) { return str.string(); } };
-		template<> struct GetStrFunc<std::wstring> { decltype(auto) operator()(const std::filesystem::path& str) { return str.wstring(); } };
+		template<> struct GetStrFunc<std::string> { decltype(auto) operator()(const std::filesystem::path& str) const { return str.string(); } };
+		template<> struct GetStrFunc<std::wstring> { decltype(auto) operator()(const std::filesystem::path& str) const { return str.wstring(); } };
 #ifndef __U8stringUseChar
-		template<> struct GetStrFunc<std::u8string> { decltype(auto) operator()(const std::filesystem::path& str) { return str.u8string(); } };
+		template<> struct GetStrFunc<std::u8string> { decltype(auto) operator()(const std::filesystem::path& str) const { return str.u8string(); } };
 #endif
-		template<> struct GetStrFunc<std::u16string> { decltype(auto) operator()(const std::filesystem::path& str) { return str.u16string(); } };
-		template<> struct GetStrFunc<std::u32string> { decltype(auto) operator()(const std::filesystem::path& str) { return str.u32string(); } };
+		template<> struct GetStrFunc<std::u16string> { decltype(auto) operator()(const std::filesystem::path& str) const { return str.u16string(); } };
+		template<> struct GetStrFunc<std::u32string> { decltype(auto) operator()(const std::filesystem::path& str) const { return str.u32string(); } };
 	}
 
 	template<typename Str>
@@ -215,7 +214,7 @@ namespace String
             const auto fmt = std::filesystem::path(fmtStr).u32string();
             __Detail::ArgsToList(argsStr, std::forward<Args>(args)...);
             const auto token = U"{}";
-            auto start = 0;
+			std::u32string::size_type start = 0;
             auto pos = fmt.find(token, start);
             uint64_t i = 0;
             while (pos != decltype(fmt)::npos)

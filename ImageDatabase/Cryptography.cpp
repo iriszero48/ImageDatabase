@@ -141,6 +141,8 @@ namespace Detail
 
 namespace Cryptography
 {
+	static_assert(Version[0] == 1 && Version[1] == 0 && Version[2] == 0 && Version[3] == 0);
+	
 #pragma region Md5
 	template<>
 	inline Hash<Md5::HashValueType>::Hash(const Md5::HashValueType& val)

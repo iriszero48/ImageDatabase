@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <type_traits>
 #include <climits>
-#include <utility>
 
 namespace Bit
 {
@@ -12,10 +11,16 @@ namespace Bit
     namespace __Detail
     {
         template<typename T, std::size_t... N>
-        constexpr T __EndianSwapImpl__(T i, std::index_sequence<N...>)
+        constexpr T EndianSwapImpl(T i, std::index_sequence<N...>)
         {
             return (((i >> N * CHAR_BIT & static_cast<std::uint8_t>(-1)) << (sizeof(T) - 1 - N) * CHAR_BIT) | ...);
         }
+
+        template<decltype(sizeof(int)) N> struct IntegerTypes {};
+		template<> struct IntegerTypes<sizeof(uint8_t)> { using Value = uint8_t; };
+		template<> struct IntegerTypes<sizeof(uint16_t)> { using Value = uint16_t; };
+		template<> struct IntegerTypes<sizeof(uint32_t)> { using Value = uint32_t; };
+		template<> struct IntegerTypes<sizeof(uint64_t)> { using Value = uint64_t; };
     }
 
 	enum class Endian
@@ -34,24 +39,11 @@ namespace Bit
 	template<typename T>
 	constexpr T EndianSwap(T i)
 	{
-		if constexpr (std::is_floating_point_v<T>)
+		if constexpr (constexpr auto size = sizeof(T); std::is_floating_point_v<T>)
 		{
-			if constexpr (sizeof(T) == sizeof(uint32_t))
-			{
-				return (T)__Detail::__EndianSwapImpl__<uint32_t>((uint32_t)i, std::make_index_sequence<sizeof(T)>{});
-			}
-			else if constexpr (sizeof(T) == sizeof(uint64_t))
-			{
-				return (T)__Detail::__EndianSwapImpl__<uint64_t>((uint64_t)i, std::make_index_sequence<sizeof(T)>{});
-			}
-			else
-			{
-
-			}
+			using Type = typename __Detail::IntegerTypes<size>::Value;
+			return static_cast<T>(__Detail::EndianSwapImpl<Type>(static_cast<Type>(i), std::make_index_sequence<size>{}));
 		}
-		else
-		{
-			return __Detail::__EndianSwapImpl__<T>(i, std::make_index_sequence<sizeof(T)>{});
-		}
+		return __Detail::EndianSwapImpl<T>(i, std::make_index_sequence<sizeof(T)>{});
 	}
 }

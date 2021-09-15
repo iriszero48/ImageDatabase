@@ -1,18 +1,19 @@
 #pragma once
 
-#include <fstream>
 #include <cstdint>
 #include <type_traits>
 #include <climits>
-
-#include "String.h"
+#include <charconv>
+#include <iomanip>
 
 namespace Serialization
 {
+    constexpr int Version[]{ 1, 0, 0, 0 };
+	
     namespace __Detail
     {
         template<typename T, std::size_t... N>
-        constexpr T __EndianSwapImpl__(T i, std::index_sequence<N...>)
+        constexpr T EndianSwapImpl(T i, std::index_sequence<N...>)
         {
             return (((i >> N * CHAR_BIT & static_cast<std::uint8_t>(-1)) << (sizeof(T) - 1 - N) * CHAR_BIT) | ...);
         }
@@ -33,7 +34,7 @@ namespace Serialization
         template<typename T, typename U = std::make_unsigned_t<T>>
         [[nodiscard]] constexpr U EndianSwap(T i)
         {
-           return __EndianSwapImpl__<U>(i, std::make_index_sequence<sizeof(T)>{});
+           return EndianSwapImpl<U>(i, std::make_index_sequence<sizeof(T)>{});
         }
 
         template<typename T>
@@ -41,24 +42,54 @@ namespace Serialization
         {
             const auto size = sizeof(T);
             uint8_t buf[size];
-            fs.read((char*)buf, size);
-            auto val = *(T*)buf;
+            fs.read(reinterpret_cast<char*>(buf), size);
+            auto val = *reinterpret_cast<T*>(buf);
             if constexpr (Endian::Native == Endian::Big) val = EndianSwap(val);
             return val;
         }
 
         template<typename T>
+        T ReadArithmeticStr(std::istream& fs)
+        {
+            const auto size = sizeof(T) * 2;
+            char buf[size];
+            fs.read(buf, size);
+            T val;
+            if (const auto [p, e] = std::from_chars(buf, buf + size, &val, 16); e != std::errc{})
+                throw std::runtime_error("[Serialization::__Detail::ReadArithmeticStr<" + std::string(typeid(T).name()) + ">] error "
+                    + std::to_string(e) + ": invalid literal: " + std::string(p));        	
+            return val;
+        }
+    	
+        template<typename T>
         void WriteArithmetic(std::ostream& fs, T val)
         {
             if constexpr (Endian::Native == Endian::Big) val = EndianSwap(val);
-            fs.write((char*)&val, sizeof(T));
+            fs.write(reinterpret_cast<char*>(&val), sizeof(T));
+        }
+
+        template<typename T>
+        void WriteArithmeticStr(std::ostream& fs, T val)
+        {
+            constexpr auto size = sizeof(T);
+            constexpr auto maxLen = size * 2;
+            constexpr auto bufSiz = maxLen + 1;
+            char buf[bufSiz]{ 0 };
+            if (const auto [p, e] = std::to_chars(buf, buf + bufSiz, val); e != std::errc{})
+                throw std::runtime_error("[Serialization::__Detail::WriteArithmeticStr<" + std::string(typeid(T).name()) +">] error "
+                    + std::to_string(e) + ": invalid literal: " + std::string(p));
+            const auto res = std::string_view(buf);
+            const auto len = res.length();
+            const std::string pad(maxLen - len, '0');
+            fs.write(pad.data(), pad.length());
+            fs.write(buf, len);
         }
     }
 
     class Serialize
     {
     public:
-        Serialize(std::ostream& fs) : fs(fs){};
+        Serialize(std::ostream& fs) : fs(fs) {}
 
         template<typename... Args>
         void WriteAsString(Args&&... args)
@@ -79,41 +110,53 @@ namespace Serialization
         {
             if constexpr (std::is_integral_v<T>)
 			{
-                if constexpr (ToStr) {}
+                if constexpr (ToStr)
+                {
+                    __Detail::WriteArithmeticStr(fs, val);
+                	return;
+                }
 
                 __Detail::WriteArithmetic(fs, val);
-				//constexpr auto bufSiz = 65;
-				//char buf[bufSiz]{0};
-				//const auto [p, e] = std::to_chars(buf, buf + bufSiz, t);
-				//if (e != std::errc{}) throw std::runtime_error("ToStringImpl error: invalid literal: " + std::string(p));
-				//return buf;
 			}
 			else if constexpr (std::is_floating_point_v<T>)
 			{
-				if constexpr (ToStr) {}
+				if constexpr (ToStr)
+				{
+                    std::ostringstream ss{};
+                    ss << std::setfill('0') << std::setw(sizeof(val) * 2) << std::hex << val;
+                    const auto res = ss.str();
+                    fs.write(res.data(), res.length());
+                    return;
+				}
 
                 __Detail::WriteArithmetic(fs, val);
 			}
 			else if constexpr ((std::is_base_of_v<std::basic_string<typename T::value_type>, T>
 					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>))
 			{
-                if constexpr (ToStr) {}
+                const uint64_t len = val.length();
+				
+                if constexpr (ToStr)
+                {
+                    __Detail::WriteArithmeticStr(fs, len);
+                    fs.write(val.data(), len);
+                    return;
+                }
 
-                const auto len = val.length();
-                __Detail::WriteArithmetic<uint64_t>(fs, len);
+				__Detail::WriteArithmetic(fs, len);
                 fs.write(val.data(), len);
 			}
 			else
 			{
-				
+                fs << val;
 			}
         }
     };
 
-    class Unserialize
+    class Deserialize
     {
     public:
-        Unserialize(std::istream& fs): fs(fs) {};
+        Deserialize(std::istream& fs): fs(fs) {};
 
         template<typename... Args>
         decltype(auto) ReadFromString()
@@ -134,34 +177,46 @@ namespace Serialization
         {
 			if constexpr (std::is_integral_v<T>)
 			{
-                if constexpr (FromStr) {}
+                if constexpr (FromStr) return __Detail::ReadArithmeticStr<T>(fs);
 
                 return __Detail::ReadArithmetic<T>(fs);
-				//constexpr auto bufSiz = 65;
-				//char buf[bufSiz]{0};
-				//const auto [p, e] = std::to_chars(buf, buf + bufSiz, t);
-				//if (e != std::errc{}) throw std::runtime_error("ToStringImpl error: invalid literal: " + std::string(p));
-				//return buf;
 			}
 			else if constexpr (std::is_floating_point_v<T>)
 			{
-				if constexpr (FromStr) {}
+				if constexpr (FromStr)
+				{
+                    constexpr auto size = sizeof(T) * 2;
+                    std::string buf(size, 0);
+                    fs.read(buf.data(), size);
+                    std::stringstream ss(size);
+                    T val;
+                    ss >> std::hex >> val;
+                    return val;
+				}
 
                 return __Detail::ReadArithmetic<T>(fs);
 			}
 			else if constexpr ((std::is_base_of_v<std::basic_string<typename T::value_type>, T>
 					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>))
 			{
-                if constexpr (FromStr) {}
-
-                const auto len = __Detail::ReadArithmetic<uint64_t>(fs);
+                uint64_t len;
+                if constexpr (FromStr)
+                {
+                    len = __Detail::ReadArithmeticStr<uint64_t>(fs);
+                }
+                else
+                {
+                    len = __Detail::ReadArithmetic<uint64_t>(fs);
+                }
                 std::string buf(len, 0);
                 fs.read(&buf[0], len);
                 return buf;
 			}
 			else
 			{
-				
+                T val;
+                fs >> val;
+                return val;
 			}
         }
     };   
