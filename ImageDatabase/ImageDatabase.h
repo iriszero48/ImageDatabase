@@ -314,6 +314,8 @@ namespace ImageDatabase
 			{
 				LoadFile(Path);
 			}
+
+			MessageQueue.Write({});
 		}
 
 		void SetLog(void(*callback)(const std::string&))
@@ -474,7 +476,6 @@ namespace ImageDatabase
 				av_frame_free(&frame);
 				avcodec_free_context(&codecCtx);
 				sws_freeContext(swsCtx);
-				MessageQueue.Write({});
 				std::throw_with_nested(Exception("[ImageDatabase::ImageFile::LoadImage] load image failed"));
 			}
 
@@ -482,7 +483,6 @@ namespace ImageDatabase
 			av_frame_free(&frame);
 			avcodec_free_context(&codecCtx);
 			sws_freeContext(swsCtx);
-			MessageQueue.Write({});
 		}
 
 		Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int lineSize) const
