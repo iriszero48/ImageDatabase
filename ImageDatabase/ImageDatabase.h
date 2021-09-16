@@ -418,11 +418,6 @@ namespace ImageDatabase
 					if (!eof)
 					{
 						ret = av_read_frame(fmtCtx, pkt);
-						if (!WhiteList.empty() && WhiteList.find(index) != WhiteList.end())
-						{
-							++index;
-							continue;
-						}
 						if (ret < 0 && ret != AVERROR_EOF) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_read_frame] {}", ret));
 						
 						if (ret == 0 && pkt->stream_index != streamId)
@@ -439,6 +434,11 @@ namespace ImageDatabase
 					}
 					else
 					{
+						if (!WhiteList.empty() && WhiteList.find(index) == WhiteList.end())
+						{
+							++index;
+							continue;
+						}
 						ret = avcodec_send_packet(codecCtx, pkt);
 						if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_send_packet] {}", ret));
 					}
@@ -566,8 +566,16 @@ namespace ImageDatabase
 			{
 				Image img{};
 
-				const auto [p] = deser.Read<std::string>();
-				if (fs.gcount() == 0) break;
+				std::string p;
+				try
+				{
+					auto [raw] = deser.Read<std::string>();
+					p = raw;
+				}
+				catch (Serialization::Eof)
+				{
+					break;
+				}
 				img.Path = std::filesystem::u8path(p);
 				if (log.has_value()) (*log)(img.Path.u8string());
 

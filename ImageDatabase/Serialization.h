@@ -9,7 +9,19 @@
 namespace Serialization
 {
     constexpr int Version[]{ 1, 0, 0, 0 };
+
+    class Exception: public std::runtime_error
+    {
+    public:
+        using std::runtime_error::runtime_error;
+    };
 	
+    class Eof: public Exception
+    {
+    public:
+        using Exception::Exception;
+    };
+
     namespace __Detail
     {
         template<typename T, std::size_t... N>
@@ -43,6 +55,7 @@ namespace Serialization
             const auto size = sizeof(T);
             uint8_t buf[size];
             fs.read(reinterpret_cast<char*>(buf), size);
+            if (fs.gcount() == 0) throw Eof("[Serialization::__Detail::ReadArithmetic] fs.gcount() == 0");
             auto val = *reinterpret_cast<T*>(buf);
             if constexpr (Endian::Native == Endian::Big) val = EndianSwap(val);
             return val;
@@ -134,17 +147,24 @@ namespace Serialization
 			else if constexpr ((std::is_base_of_v<std::basic_string<typename T::value_type>, T>
 					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>))
 			{
-                const uint64_t len = val.length();
-				
-                if constexpr (ToStr)
+                try
                 {
-                    __Detail::WriteArithmeticStr(fs, len);
-                    fs.write(val.data(), len);
-                    return;
-                }
+                    const uint64_t len = val.length();
+                    
+                    if constexpr (ToStr)
+                    {
+                        __Detail::WriteArithmeticStr(fs, len);
+                        fs.write(val.data(), len);
+                        return;
+                    }
 
-				__Detail::WriteArithmetic(fs, len);
-                fs.write(val.data(), len);
+                    __Detail::WriteArithmetic(fs, len);
+                    fs.write(val.data(), len);
+                }
+                catch(Eof)
+                {
+                    std::throw_with_nested(Eof("[Serialization::Serialize::WriteImpl<" + std::string(typeid(T).name()) + ">] len == NULL"));
+                }
 			}
 			else
 			{
