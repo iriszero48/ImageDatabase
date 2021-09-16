@@ -7,6 +7,7 @@
 #include <thread>
 #include <string>
 #include <chrono>
+#include <regex>
 
 extern "C"
 {
@@ -48,11 +49,11 @@ struct LogMsg
 	const char* File;
 	decltype(__LINE__) Line;
 	const char* Function;
-	std::wstring Message;
+	std::u16string Message;
 }; 
 
 static Logger<LogMsg> Log;
-#define LogImpl(level, ...) Log.Write<level>(std::chrono::system_clock::now(), "main.cpp", __LINE__, __func__, String::FormatWstr(__VA_ARGS__))
+#define LogImpl(level, func, ...) Log.Write<level>(std::chrono::system_clock::now(), "main.cpp", __LINE__, func, String::FormatU16str(__VA_ARGS__))
 #define LogNone(...) LogImpl(LogLevel::None, __VA_ARGS__)
 #define LogErr(...) LogImpl(LogLevel::Error, __VA_ARGS__)
 #define LogWarn(...) LogImpl(LogLevel::Warn, __VA_ARGS__)
@@ -122,6 +123,26 @@ int main(int argc, char* argv[])
 			return val;
 		}
 	};
+	ArgumentsParse::Argument<std::unordered_set<uint64_t>> whiteListArg
+	{
+		"--white",
+		"white list: 'index1;index2;...'",
+		[](const auto& value)
+		{
+			const auto vf = std::string(value) + ";";
+			const std::regex re(R"([^;]+?;)");
+			auto begin = std::sregex_iterator(vf.begin(), vf.end(), re);
+			const auto end = std::sregex_iterator();
+			std::unordered_set<uint64_t> wl{};
+			for (auto i = begin; i != end; ++i)
+			{
+				const auto match = i->str();
+				const auto f = match.substr(0, match.length() - 1);
+				wl.emplace(*Convert::FromString<uint64_t>(f));
+			}
+			return wl;
+		}
+	};
 	ArgumentsParse::Argument<LogLevel> logLevelArg
 	{
 		"--loglevel",
@@ -142,6 +163,7 @@ int main(int argc, char* argv[])
 		.Add(dbArg)
 		.Add(pathArg)
 		.Add(thresholdArg)
+		.Add(whiteListArg)
 		.Add(logLevelArg)
 		.Add(logFileArg);
 
@@ -154,7 +176,7 @@ int main(int argc, char* argv[])
 		std::thread logThread;
 		args.Parse(argc, argv);
 
-		LogInfo("\n{}", args.GetValuesDesc({
+		LogInfo("main", "\n{}", args.GetValuesDesc({
 			args.GetValuesDescConverter<std::string>([](const auto& x) { return x; }),
 			args.GetValuesDescConverter<std::filesystem::path>([](const auto& x) { return x.string(); }),
 			args.GetValuesDescConverter<Operator>([](const auto& x) { return ToString(x); }),
@@ -182,17 +204,24 @@ int main(int argc, char* argv[])
 					return AV_LOG_INFO;
 				}
 			}());
+
 			av_log_set_callback([](void* avc, int ffLevel, const char* fmt, va_list vl)
 			{
 				static char buf[4096]{ 0 };
 				int ret = 1;
 				av_log_format_line2(avc, ffLevel, fmt, vl, buf, 4096, &ret);
-				auto data = String::ToString<std::wstring>(buf);
-				if (const auto pos = data.find_last_of(L'\n'); pos != std::wstring::npos) data.erase(pos);
-				if (ffLevel <= 16) LogErr(data);
-				else if (ffLevel <= 24) LogWarn(data);
-				else if (ffLevel <= 32) LogLog(data);
-				else LogDebug(data);
+				auto data = std::filesystem::u8path(buf).u16string();
+				if (ffLevel <= 16) LogErr("main::logThread::av", data);
+				else if (ffLevel <= 24) LogWarn("main::logThread::av", data);
+				else if (ffLevel <= 32) LogLog("main::logThread::av", data);
+				else LogDebug("main::logThread::av", data);
+			});
+
+			cv::redirectError([](const int status, const char* funcName, const char* errMsg,
+			                     const char* fileName, const int line, void*)
+			{
+				LogErr("main::logThread::cv", "[{}:{}] [{}] error {}: {}", fileName, line, funcName, status, errMsg);
+				return 0;
 			});
 
 			Log.level = level;
@@ -204,19 +233,31 @@ int main(int argc, char* argv[])
 				fs.rdbuf()->pubsetbuf(buf.get(), 4096);
 				if (!fs)
 				{
-					LogErr(L"log file: " + logFile.wstring() + L": open fail");
+					LogErr("main::logThread", "log file '{}': open fail", logFile.u16string());
 					logFile = "";
 				}
 			}
+
+			std::unordered_map<LogLevel, Console::Color> colorMap
+			{
+				{ LogLevel::None, Console::Color::White },
+				{ LogLevel::Error, Console::Color::Red },
+				{ LogLevel::Warn, Console::Color::Yellow },
+				{ LogLevel::Log, Console::Color::White },
+				{ LogLevel::Info, Console::Color::Blue },
+				{ LogLevel::Debug, Console::Color::Gray }
+			};
 
 			while (true)
 			{
 				const auto [level, raw] = Log.Chan.Read();
 				const auto& [time, file, line, func, msg] = raw;
 
-				const auto out = String::FormatWstr("[{}] [{}] [{}:{}] [{}] {}", ToString(level), LogTime(time), file, line, func, msg);
+				auto out = String::FormatU16str("[{}] [{}] [{}:{}] [{}] {}", ToString(level), LogTime(time), file, line, func, msg);
+				if (out[out.length() - 1] == u'\n') out.erase(out.length() - 1);
 				const auto outU8 = std::filesystem::path(out).u8string();
 
+				
 				Console::WriteLine(outU8);
 				if (!logFile.empty())
 				{
@@ -236,7 +277,7 @@ int main(int argc, char* argv[])
 		{
 			static const auto LogForward = [](const std::string& msg)
 			{
-				LogDebug(msg);
+				LogDebug("main::LogForward", msg);
 			};
 			
 			std::unordered_map<Operator, std::function<void()>>
@@ -245,6 +286,7 @@ int main(int argc, char* argv[])
 				{
 					const auto dbPath = args.Value(dbArg);
 					const auto buildPath = args.Value(pathArg);
+					const auto whiteList = args.Get(whiteListArg);
 
 					ImageDatabase::Database db{};
 					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
@@ -256,8 +298,9 @@ int main(int argc, char* argv[])
 							try
 							{
 								const auto& filePath = file.path();
-								LogInfo("load file '{}'", filePath.wstring());
+								LogInfo("main::map::build", "load file '{}'", filePath.u16string());
 								ImageDatabase::ImageFile img(filePath);
+								if (whiteList.has_value()) img.WhiteList = *whiteList;
 								if (logLevel >= LogLevel::Debug) img.SetLog(LogForward);
 								img.Parse();
 								uint64_t size = 0;
@@ -268,19 +311,19 @@ int main(int argc, char* argv[])
 									db.Images.push_back(i);
 									++size;
 								}
-								LogInfo("image count: {}", size);
+								LogInfo("main::map::build", "image count: {}", size);
 							}
 							catch(const std::exception& e)
 							{
-								LogErr(LogException(e));
+								LogErr("main::map::build", LogException(e));
 							}
 							
 						}
 					}
 
-					LogLog("save database: {}", dbPath.wstring());
+					LogLog("main::map::build", "save database: {}", dbPath.u16string());
 					db.Save(dbPath);
-					LogLog("database size: {}", db.Images.size());
+					LogLog("main::map::build", "database size: {}", db.Images.size());
 				}},
 				{Operator::query, [&]()
 				{
@@ -288,30 +331,31 @@ int main(int argc, char* argv[])
 					const auto input = args.Value(pathArg);
 					const auto threshold = args.Value(thresholdArg);
 
-					LogInfo("load database: {}", dbPath.wstring());
+					LogInfo("main::map::query", "load database: {}", dbPath.u16string());
 					ImageDatabase::Database db(dbPath);
 					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
 					
-					LogInfo("database size: {}", db.Images.size());
+					LogInfo("main::map::query", "database size: {}", db.Images.size());
 
-					LogInfo("load file: {}", input.wstring());
+					LogInfo("main::map::query", "load file: {}", input.u16string());
 					ImageDatabase::ImageFile file(input);
 					if (logLevel >= LogLevel::Debug) file.SetLog(LogForward);
 					file.WhiteList = { 0 };
+					file.Parse();
 					const auto img = file.MessageQueue.Read();
 
-					LogInfo("search start ...");
+					LogInfo("main::map::query", "search start ...");
 
 					Algorithm::ForEach<true>(db.Images.begin(), db.Images.end(), [&](auto& x) { x.Dot = x.Vgg16.dot(img.Vgg16); });
 					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [](const auto& a, const auto& b)
 						{ return std::greater()(a.Dot, b.Dot); });
 
-					LogInfo("search done.");
+					LogInfo("main::map::query", "search done.");
 					for (const auto& [p, _, _unused, v] : db.Images)
 					{
 						if (v >= threshold)
 						{
-							LogLog("found '{}': {}", p.wstring(), v);
+							LogLog("main::map::query", "found '{}': {}", p.u16string(), v);
 						}
 						else
 						{
@@ -323,11 +367,11 @@ int main(int argc, char* argv[])
 		}
 		catch (const std::exception& ex)
 		{
-			LogErr(LogException(ex));
-			LogLog(usage());
+			LogErr("main", LogException(ex));
+			LogLog("main", usage());
 		}
 
-		LogNone("{ok}.");
+		LogNone("main", "{ok}.");
 
 		logThread.join();
 	}

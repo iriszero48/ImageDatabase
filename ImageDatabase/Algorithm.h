@@ -2,19 +2,8 @@
 
 #include <algorithm>
 
-#if defined(WindowsPlatform) || defined(LinuxPlatform)
-#include <execution>
-#endif
-
-#ifdef MacintoshPlatform
-#include <tbb/parallel_sort.h>
-#include <tbb/parallel_for.h>
-#endif
-
 namespace Algorithm
 {
-    constexpr int Version[]{1, 0, 0, 0};
-
     namespace __Detail
     {
         namespace Environment
@@ -40,7 +29,21 @@ namespace Algorithm
             };
         }
     }
-	
+}
+
+#if defined(WindowsPlatform) || defined(LinuxPlatform)
+#include <execution>
+#endif
+
+#ifdef MacintoshPlatform
+#include <tbb/parallel_sort.h>
+#include <tbb/parallel_for.h>
+#endif
+
+namespace Algorithm
+{
+    constexpr int Version[]{1, 0, 0, 0};
+
     template<bool Parallel = false, typename It, typename Cmp>
     void Sort(It&& begin, It&& end, Cmp&& cmp)
     {
@@ -65,9 +68,9 @@ namespace Algorithm
         {
             #ifdef MacintoshPlatform
             {
-                tbb::parallel_for(0, end - begin, [&](std::size_t index)
+                tbb::parallel_for(tbb::blocked_range(begin, end), [&](const auto& rng)
                 {
-                    op(begin + index);
+                    std::for_each(rng.begin(), rng.end(), op);
                 });
             }
             #else

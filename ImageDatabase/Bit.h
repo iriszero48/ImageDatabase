@@ -36,14 +36,17 @@ namespace Bit
 #endif
 	};
 	
-	template<typename T>
+	template<typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	constexpr T EndianSwap(T i)
 	{
-		if constexpr (constexpr auto size = sizeof(T); std::is_floating_point_v<T>)
-		{
-			using Type = typename __Detail::IntegerTypes<size>::Value;
-			return static_cast<T>(__Detail::EndianSwapImpl<Type>(static_cast<Type>(i), std::make_index_sequence<size>{}));
-		}
 		return __Detail::EndianSwapImpl<T>(i, std::make_index_sequence<sizeof(T)>{});
+	}
+
+	template<typename T, std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+	constexpr T EndianSwap(T i)
+	{
+		constexpr auto size = sizeof(T);
+		using Type = typename __Detail::IntegerTypes<size>::Value;
+		return static_cast<T>(__Detail::EndianSwapImpl<Type>(static_cast<Type>(i), std::make_index_sequence<size>{}));
 	}
 }
