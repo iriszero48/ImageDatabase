@@ -54,12 +54,12 @@ struct LogMsg
 
 static Logger<LogMsg> Log;
 #define LogImpl(level, func, ...) Log.Write<level>(std::chrono::system_clock::now(), "main.cpp", __LINE__, func, String::FormatU16str(__VA_ARGS__))
-#define LogNone(...) LogImpl(LogLevel::None, __VA_ARGS__)
-#define LogErr(...) LogImpl(LogLevel::Error, __VA_ARGS__)
-#define LogWarn(...) LogImpl(LogLevel::Warn, __VA_ARGS__)
-#define LogLog(...) LogImpl(LogLevel::Log, __VA_ARGS__)
-#define LogInfo(...) LogImpl(LogLevel::Info, __VA_ARGS__)
-#define LogDebug(...) LogImpl(LogLevel::Debug, __VA_ARGS__)
+#define LogNone(func, ...) LogImpl(LogLevel::None, func, __VA_ARGS__)
+#define LogErr(func, ...) LogImpl(LogLevel::Error, func, __VA_ARGS__)
+#define LogWarn(func, ...) LogImpl(LogLevel::Warn, func, __VA_ARGS__)
+#define LogLog(func, ...) LogImpl(LogLevel::Log, func, __VA_ARGS__)
+#define LogInfo(func, ...) LogImpl(LogLevel::Info, func, __VA_ARGS__)
+#define LogDebug(func, ...) LogImpl(LogLevel::Debug, func, __VA_ARGS__)
 
 static void LogExceptionImpl(std::vector<std::string>& out, const std::exception& e, const int level)
 {
@@ -186,44 +186,44 @@ int main(int argc, char* argv[])
 
 		const auto logLevel = args.Value(logLevelArg);
 
+		av_log_set_level([&]()
+		{
+			switch (logLevel)
+			{
+			case LogLevel::None:
+				return AV_LOG_QUIET;
+			case LogLevel::Error:
+				return AV_LOG_ERROR;
+			case LogLevel::Warn:
+				return AV_LOG_WARNING;
+			case LogLevel::Debug:
+				return AV_LOG_VERBOSE;
+			default:
+				return AV_LOG_INFO;
+			}
+		}());
+
+		av_log_set_callback([](void* avc, int ffLevel, const char* fmt, va_list vl)
+		{
+			static char buf[4096]{ 0 };
+			int ret = 1;
+			av_log_format_line2(avc, ffLevel, fmt, vl, buf, 4096, &ret);
+			auto data = std::filesystem::u8path(buf).u16string();
+			if (ffLevel <= 16) LogErr("main::av", data);
+			else if (ffLevel <= 24) LogWarn("main::av", data);
+			else if (ffLevel <= 32) LogLog("main::av", data);
+			else LogDebug("main::av", data);
+		});
+
+		cv::redirectError([](const int status, const char* funcName, const char* errMsg,
+			const char* fileName, const int line, void*)
+		{
+			LogErr("main::cv", "[{}:{}] [{}] error {}: {}", fileName, line, funcName, status, errMsg);
+			return 0;
+		});
+		
 		logThread = std::thread([](const LogLevel& level, std::filesystem::path logFile)
 		{
-			av_log_set_level([&]()
-			{
-				switch (level)
-				{
-				case LogLevel::None:
-					return AV_LOG_QUIET;
-				case LogLevel::Error:
-					return AV_LOG_ERROR;
-				case LogLevel::Warn:
-					return AV_LOG_WARNING;
-				case LogLevel::Debug:
-					return AV_LOG_VERBOSE;
-				default:
-					return AV_LOG_INFO;
-				}
-			}());
-
-			av_log_set_callback([](void* avc, int ffLevel, const char* fmt, va_list vl)
-			{
-				static char buf[4096]{ 0 };
-				int ret = 1;
-				av_log_format_line2(avc, ffLevel, fmt, vl, buf, 4096, &ret);
-				auto data = std::filesystem::u8path(buf).u16string();
-				if (ffLevel <= 16) LogErr("main::logThread::av", data);
-				else if (ffLevel <= 24) LogWarn("main::logThread::av", data);
-				else if (ffLevel <= 32) LogLog("main::logThread::av", data);
-				else LogDebug("main::logThread::av", data);
-			});
-
-			cv::redirectError([](const int status, const char* funcName, const char* errMsg,
-			                     const char* fileName, const int line, void*)
-			{
-				LogErr("main::logThread::cv", "[{}:{}] [{}] error {}: {}", fileName, line, funcName, status, errMsg);
-				return 0;
-			});
-
 			Log.level = level;
 			std::ofstream fs;
 			if (!logFile.empty())
@@ -257,8 +257,10 @@ int main(int argc, char* argv[])
 				if (out[out.length() - 1] == u'\n') out.erase(out.length() - 1);
 				const auto outU8 = std::filesystem::path(out).u8string();
 
-				
+				SetForegroundColor(colorMap.at(level));
 				Console::WriteLine(outU8);
+
+				
 				if (!logFile.empty())
 				{
 					fs << outU8 << std::endl;
@@ -275,9 +277,9 @@ int main(int argc, char* argv[])
 
 		try
 		{
-			static const auto LogForward = [](const std::string& msg)
+			static const auto LogForward = [](const std::string& u8Msg)
 			{
-				LogDebug("main::LogForward", msg);
+				LogDebug("main::LogForward", std::filesystem::u8path(u8Msg).u16string());
 			};
 			
 			std::unordered_map<Operator, std::function<void()>>
@@ -289,29 +291,42 @@ int main(int argc, char* argv[])
 					const auto whiteList = args.Get(whiteListArg);
 
 					ImageDatabase::Database db{};
-					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
+					if (logLevel >= LogLevel::Info) db.SetLog(LogForward);
 
-					for (const auto& file : std::filesystem::recursive_directory_iterator(buildPath))
+					Thread::Channel<ImageDatabase::Image> mq{};
+
+					std::thread receiver([](decltype(Log)& Log, Thread::Channel<ImageDatabase::Image>& queue, ImageDatabase::Database& database)
 					{
+						while (true)
+						{
+							auto i = queue.Read();
+							const auto& [p, m, v, _] = i;
+							if (p.empty()) break;
+							LogInfo("main::map::build::receiver", "{ path: {}; md5: {}; vgg16.[0]: {}; }", p.u16string(), std::string_view(m.data(), 32), v(0, 0));
+							database.Images.push_back(std::move(i));
+						}
+					}, std::ref(Log), std::ref(mq), std::ref(db));
+
+					std::error_code ec;
+					std::filesystem::recursive_directory_iterator rec(buildPath, ec);
+					for (const auto& file : rec)
+					{
+						if (ec != std::error_code{})
+						{
+							LogErr("main::map::build::receiver", "[std::filesystem::recursive_directory_iterator] path '{}': {}", file.path().u16string(), ec.message());
+							rec.pop();
+							continue;
+						}
 						if (file.is_regular_file())
 						{
 							try
 							{
 								const auto& filePath = file.path();
 								LogInfo("main::map::build", "load file '{}'", filePath.u16string());
-								ImageDatabase::ImageFile img(filePath);
+								ImageDatabase::ImageFile img(mq, filePath);
 								if (whiteList.has_value()) img.WhiteList = *whiteList;
 								if (logLevel >= LogLevel::Debug) img.SetLog(LogForward);
 								img.Parse();
-								uint64_t size = 0;
-								while (true)
-								{
-									const auto i = img.MessageQueue.Read();
-									if (i.Path.empty()) break;
-									db.Images.push_back(i);
-									++size;
-								}
-								LogInfo("main::map::build", "image count: {}", size);
 							}
 							catch(const std::exception& e)
 							{
@@ -321,6 +336,9 @@ int main(int argc, char* argv[])
 						}
 					}
 
+					mq.Write({});
+					receiver.join();
+					
 					LogLog("main::map::build", "save database: {}", dbPath.u16string());
 					db.Save(dbPath);
 					LogLog("main::map::build", "database size: {}", db.Images.size());
@@ -334,11 +352,13 @@ int main(int argc, char* argv[])
 					LogInfo("main::map::query", "load database: {}", dbPath.u16string());
 					ImageDatabase::Database db(dbPath);
 					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
+
+					Thread::Channel<ImageDatabase::Image> mq{};
 					
 					LogInfo("main::map::query", "database size: {}", db.Images.size());
 
 					LogInfo("main::map::query", "load file: {}", input.u16string());
-					ImageDatabase::ImageFile file(input);
+					ImageDatabase::ImageFile file(mq, input);
 					if (logLevel >= LogLevel::Debug) file.SetLog(LogForward);
 					file.WhiteList = { 0 };
 					file.Parse();

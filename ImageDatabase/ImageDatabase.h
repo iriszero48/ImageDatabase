@@ -230,12 +230,34 @@ namespace ImageDatabase
 			AVIOContext* ctx = nullptr;
 		};
 
-		std::string FFmpegToString(const int err)
+		std::string FFmpegErrStr(const int err)
 		{
 			char buf[4096]{0};
 			if (const auto ret = av_strerror(err, buf, 4096); ret < 0)
 				return String::FormatStr("unknow error code {}", ret);
 			return std::string(buf);
+		}
+
+		std::string LibzipErrStr(const zip_error_t& err)
+		{
+			std::string buf;
+			
+			if (const auto se = err.sys_err; se != 0)
+			{
+				buf.append("system error: ");
+				if (se == 1) buf.append("ZIP_ET_SYS");
+				else if (se == 2) buf.append("ZIP_ET_ZLIB");
+				else buf.append(*Convert::ToString(se));
+				buf.append(", ");
+			}
+
+			buf.append("zip error: ");
+			zip_error_t error;
+			zip_error_init_with_code(&error, err.zip_err);
+			buf.append(zip_error_strerror(&error));
+			zip_error_fini(&error);
+
+			return buf;
 		}
 	}
 
@@ -250,12 +272,12 @@ namespace ImageDatabase
 	struct ImageFile
 	{
 		std::filesystem::path Path{};
-		Thread::Channel<Image> MessageQueue{};
+		Thread::Channel<Image>& MessageQueue;
 		std::unordered_set<uint64_t> WhiteList{};
 
 		ImageFile() = delete;
 
-		ImageFile(const std::filesystem::path& path) : Path(path) {}
+		ImageFile(Thread::Channel<Image>& mq, std::filesystem::path path) : Path(std::move(path)), MessageQueue(mq) {}
 
 		void Parse()
 		{
@@ -265,22 +287,23 @@ namespace ImageDatabase
 			{
 				const auto zipFile = File::ReadToEnd(Path);
 
-				std::string errLog;
 				zip_error_t error;
 				zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.length(), 0, &error);
 				if (src == nullptr && error.zip_err != ZIP_ER_OK)
-					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_source_buffer_create] {}", error.str));
+					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_source_buffer_create] {}", __Detail::LibzipErrStr(error)));
 
 				zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &error);
 				if (za == nullptr && error.zip_err != ZIP_ER_OK)
-					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_open_from_source] {}", error.zip_err));
+				{
+					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_open_from_source] {}", __Detail::LibzipErrStr(error)));
+				}
 
 				const auto entries = zip_get_num_entries(za, 0);
 				if (entries < 0)
 				{
-					std::string msg = zip_get_error(za)->str;
+					auto err = zip_get_error(za);
 					zip_close(za);
-					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_get_num_entries] {}", msg));
+					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_get_num_entries] {}", __Detail::LibzipErrStr(*err)));
 				}
 
 				for (int i = 0; i < entries; ++i)
@@ -291,8 +314,8 @@ namespace ImageDatabase
 						if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
 						{
 							auto* const zf = zip_fopen_index(za, i, 0);
-							if (const auto err = zip_get_error(za)->zip_err; zf == nullptr && err != ZIP_ER_OK)
-								throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_fopen_index] {}", err));
+							if (const auto err = zip_get_error(za); zf == nullptr && err != ZIP_ER_OK)
+								throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_fopen_index] {}", __Detail::LibzipErrStr(*err)));
 
 							std::string buf(zs.size, 0);
 
@@ -314,8 +337,6 @@ namespace ImageDatabase
 			{
 				LoadFile(Path);
 			}
-
-			MessageQueue.Write({});
 		}
 
 		void SetLog(void(*callback)(const std::string&))
@@ -330,7 +351,7 @@ namespace ImageDatabase
 		{
 			AVFormatContext* fmtCtx = nullptr;
 			if (const int ret = avformat_open_input(&fmtCtx, path.u8string().c_str(), nullptr, nullptr); ret < 0)
-				throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(1)] [avforamt_open_input] {}",  __Detail::FFmpegToString(ret)));
+				throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(1)] [avforamt_open_input] {}",  __Detail::FFmpegErrStr(ret)));
 
 			LoadImage(path, fmtCtx);
 
@@ -346,7 +367,7 @@ namespace ImageDatabase
 			ctx->pb = privCtx.GetAvio();
 
 			if (int ret = avformat_open_input(&ctx, nullptr, nullptr, nullptr); ret < 0)
-				throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(2)] [avforamt_open_input] {}",  ret));
+				throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadFile(2)] [avforamt_open_input] {}", __Detail::FFmpegErrStr(ret)));
 
 			LoadImage(path, ctx);
 
@@ -364,10 +385,10 @@ namespace ImageDatabase
 			try
 			{
 				int ret = avformat_find_stream_info(fmtCtx, nullptr);
-				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avformat_find_stream_info] {}", ret));
+				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avformat_find_stream_info] {}", __Detail::FFmpegErrStr(ret)));
 
 				ret = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0);
-				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_find_best_stream] {}", ret));
+				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_find_best_stream] {}", __Detail::FFmpegErrStr(ret)));
 
 				const int streamId = ret;
 				const auto codecParams = fmtCtx->streams[streamId]->codecpar;
@@ -376,35 +397,38 @@ namespace ImageDatabase
 				if (!codecCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [avcodec_alloc_context3] NULL");
 
 				ret = avcodec_parameters_to_context(codecCtx, codecParams);
-				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_parameters_to_context] {}", ret));
+				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_parameters_to_context] {}", __Detail::FFmpegErrStr(ret)));
 
 				ret = avcodec_open2(codecCtx, codec, nullptr);
-				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_open2] {}", ret));
+				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_open2] {}", __Detail::FFmpegErrStr(ret)));
 
 				constexpr auto dstWidth = 224;
 				constexpr auto dstHeight = 224;
 				constexpr AVPixelFormat dstPixFmt = AV_PIX_FMT_BGR24;
-
+				bool setRange = false;
+				
 				if (codecCtx->pix_fmt != AV_PIX_FMT_NONE)
 				{
 					swsCtx = sws_getCachedContext(
 						nullptr, codecParams->width, codecParams->height, codecCtx->pix_fmt,
 						dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
 					if (!swsCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [sws_getCachedContext] NULL");
+
+					
 				}
 
 				frame = av_frame_alloc();
 				if (!frame) throw Exception("[ImageDatabase::ImageFile::LoadImage] [av_frame_alloc] NULL");
 
 				const auto frameSize = av_image_get_buffer_size(dstPixFmt, dstWidth, dstHeight, dstWidth);
-				if (frameSize < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_image_get_buffer_size] {}", frameSize));
+				if (frameSize < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_image_get_buffer_size] {}", __Detail::FFmpegErrStr(frameSize)));
 
 				std::string frameBuf(frameSize, 0);
 				ret = av_image_fill_arrays(
 					frame->data, frame->linesize,
 					reinterpret_cast<uint8_t*>(frameBuf.data()),
 					dstPixFmt, dstWidth, dstHeight, dstWidth);
-				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_image_fill_arrays] {}", ret));
+				if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_image_fill_arrays] {}", __Detail::FFmpegErrStr(ret)));
 										
 				decFrame = av_frame_alloc();
 				if (!decFrame) throw Exception("[ImageDatabase::ImageFile::LoadImage] [av_frame_alloc] NULL");
@@ -420,7 +444,7 @@ namespace ImageDatabase
 					if (!eof)
 					{
 						ret = av_read_frame(fmtCtx, pkt);
-						if (ret < 0 && ret != AVERROR_EOF) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_read_frame] {}", ret));
+						if (ret < 0 && ret != AVERROR_EOF) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [av_read_frame] {}", __Detail::FFmpegErrStr(ret)));
 						
 						if (ret == 0 && pkt->stream_index != streamId)
 						{
@@ -442,7 +466,7 @@ namespace ImageDatabase
 							continue;
 						}
 						ret = avcodec_send_packet(codecCtx, pkt);
-						if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_send_packet] {}", ret));
+						if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_send_packet] {}", __Detail::FFmpegErrStr(ret)));
 					}
 					while (ret >= 0)
 					{
@@ -452,7 +476,7 @@ namespace ImageDatabase
 							av_packet_unref(pkt);
 							break;
 						}
-						if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_receive_frame] {}", ret));
+						if (ret < 0) throw Exception(String::FormatStr("[ImageDatabase::ImageFile::LoadImage] [avcodec_receive_frame] {}", __Detail::FFmpegErrStr(ret)));
 
 						if (swsCtx == nullptr)
 						{
@@ -461,10 +485,21 @@ namespace ImageDatabase
 								dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
 							if (!swsCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [sws_getCachedContext] NULL");
 						}
+
+						if (!setRange)
+						{
+							ret = sws_setColorspaceDetails(swsCtx,
+								sws_getCoefficients(decFrame->colorspace), decFrame->color_range, 
+								sws_getCoefficients(SWS_CS_BT2020), AVCOL_RANGE_JPEG,
+								0, 1 << 16, 1 << 16);
+							if (ret == -1) if (!swsCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [sws_setColorspaceDetails] not supported");
+							setRange = true;
+						}
 						
 						sws_scale(swsCtx, decFrame->data, decFrame->linesize, 0, decFrame->height, frame->data, frame->linesize);
-
-						MessageQueue.Write(ProcImage(path / *Convert::ToString(index++), frameBuf, frame->linesize[0]));
+						
+						MessageQueue.Write(ProcImage(index == 0 ? path : path / *Convert::ToString(index), frameBuf, frame->linesize[0]));
+						index++;
 					}
 					av_packet_unref(pkt);
 				} while (!eof);
@@ -485,7 +520,7 @@ namespace ImageDatabase
 			sws_freeContext(swsCtx);
 		}
 
-		Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int lineSize) const
+		[[nodiscard]] Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int lineSize) const
 		{
 			Image out{};
 			out.Path = path;
