@@ -143,6 +143,13 @@ int main(int argc, char* argv[])
 			return wl;
 		}
 	};
+	ArgumentsParse::Argument<ImageDatabase::Device> deviceArg
+	{
+		"--device",
+		String::FormatStr("device {}", ImageDatabase::DeviceDesc(ToString(ImageDatabase::Device::cpu))),
+		ImageDatabase::Device::cpu,
+		Function::Combine(toStr, ImageDatabase::ToDevice)
+	};
 	ArgumentsParse::Argument<LogLevel> logLevelArg
 	{
 		"--loglevel",
@@ -164,6 +171,7 @@ int main(int argc, char* argv[])
 		.Add(pathArg)
 		.Add(thresholdArg)
 		.Add(whiteListArg)
+		.Add(deviceArg)
 		.Add(logLevelArg)
 		.Add(logFileArg);
 
@@ -182,6 +190,7 @@ int main(int argc, char* argv[])
 			args.GetValuesDescConverter<Operator>([](const auto& x) { return ToString(x); }),
 			args.GetValuesDescConverter<LogLevel>([](const auto& x) { return ToString(x); }),
 			args.GetValuesDescConverter<float>([](const auto& x) { return *Convert::ToString(x); }),
+			args.GetValuesDescConverter<ImageDatabase::Device>([](const auto & x) { return ToString(x); })
 		}));
 
 		const auto logLevel = args.Value(logLevelArg);
@@ -289,9 +298,14 @@ int main(int argc, char* argv[])
 					const auto dbPath = args.Value(dbArg);
 					const auto buildPath = args.Value(pathArg);
 					const auto whiteList = args.Get(whiteListArg);
+					const auto dev = args.Value(deviceArg);
 
+					ImageDatabase::Extractor extractor(dev);
+					
 					ImageDatabase::Database db{};
 					if (logLevel >= LogLevel::Info) db.SetLog(LogForward);
+					if (exists(dbPath)) db.Load(dbPath);
+					LogInfo("main::build", "database size: {}", db.Images.size());
 
 					Thread::Channel<ImageDatabase::Image> mq{};
 
@@ -302,7 +316,7 @@ int main(int argc, char* argv[])
 							auto i = queue.Read();
 							const auto& [p, m, v, _] = i;
 							if (p.empty()) break;
-							LogInfo("main::map::build::receiver", "{ path: {}; md5: {}; vgg16.[0]: {}; }", p.u16string(), std::string_view(m.data(), 32), v(0, 0));
+							LogInfo("main::build::receiver", "{ path: {}; md5: {}; vgg16.[0]: {}; }", p.u16string(), std::string_view(m.data(), 32), v(0, 0));
 							database.Images.push_back(std::move(i));
 						}
 					}, std::ref(Log), std::ref(mq), std::ref(db));
@@ -313,7 +327,7 @@ int main(int argc, char* argv[])
 					{
 						if (ec != std::error_code{})
 						{
-							LogErr("main::map::build::receiver", "[std::filesystem::recursive_directory_iterator] path '{}': {}", file.path().u16string(), ec.message());
+							LogErr("main::build", "[std::filesystem::recursive_directory_iterator] path '{}': {}", file.path().u16string(), ec.message());
 							rec.pop();
 							continue;
 						}
@@ -322,15 +336,15 @@ int main(int argc, char* argv[])
 							try
 							{
 								const auto& filePath = file.path();
-								LogInfo("main::map::build", "load file '{}'", filePath.u16string());
-								ImageDatabase::ImageFile img(mq, filePath);
+								LogInfo("main::build", "load file '{}'", filePath.u16string());
+								ImageDatabase::ImageFile img(mq, extractor, filePath);
 								if (whiteList.has_value()) img.WhiteList = *whiteList;
 								if (logLevel >= LogLevel::Debug) img.SetLog(LogForward);
 								img.Parse();
 							}
 							catch(const std::exception& e)
 							{
-								LogErr("main::map::build", LogException(e));
+								LogErr("main::build", LogException(e));
 							}
 							
 						}
@@ -339,43 +353,46 @@ int main(int argc, char* argv[])
 					mq.Write({});
 					receiver.join();
 					
-					LogLog("main::map::build", "save database: {}", dbPath.u16string());
+					LogLog("main::build", "save database: {}", dbPath.u16string());
 					db.Save(dbPath);
-					LogLog("main::map::build", "database size: {}", db.Images.size());
+					LogLog("main::build", "database size: {}", db.Images.size());
 				}},
 				{Operator::query, [&]()
 				{
 					const auto dbPath = args.Value(dbArg);
 					const auto input = args.Value(pathArg);
 					const auto threshold = args.Value(thresholdArg);
+					const auto dev = args.Value(deviceArg);
 
-					LogInfo("main::map::query", "load database: {}", dbPath.u16string());
+					ImageDatabase::Extractor extractor(dev);
+
+					LogInfo("main::query", "load database: {}", dbPath.u16string());
 					ImageDatabase::Database db(dbPath);
 					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
 
 					Thread::Channel<ImageDatabase::Image> mq{};
 					
-					LogInfo("main::map::query", "database size: {}", db.Images.size());
+					LogInfo("main::query", "database size: {}", db.Images.size());
 
-					LogInfo("main::map::query", "load file: {}", input.u16string());
-					ImageDatabase::ImageFile file(mq, input);
+					LogInfo("main::query", "load file: {}", input.u16string());
+					ImageDatabase::ImageFile file(mq, extractor, input);
 					if (logLevel >= LogLevel::Debug) file.SetLog(LogForward);
 					file.WhiteList = { 0 };
 					file.Parse();
-					const auto img = file.MessageQueue.Read();
+					const auto img = mq.Read();
 
-					LogInfo("main::map::query", "search start ...");
+					LogInfo("main::query", "search start ...");
 
 					Algorithm::ForEach<true>(db.Images.begin(), db.Images.end(), [&](auto& x) { x.Dot = x.Vgg16.dot(img.Vgg16); });
 					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [](const auto& a, const auto& b)
 						{ return std::greater()(a.Dot, b.Dot); });
 
-					LogInfo("main::map::query", "search done.");
+					LogInfo("main::query", "search done.");
 					for (const auto& [p, _, _unused, v] : db.Images)
 					{
 						if (v >= threshold)
 						{
-							LogLog("main::map::query", "found '{}': {}", p.u16string(), v);
+							LogLog("main::query", "found '{}': {}", p.u16string(), v);
 						}
 						else
 						{

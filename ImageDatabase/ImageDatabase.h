@@ -261,6 +261,8 @@ namespace ImageDatabase
 		}
 	}
 
+	ArgumentOption(Device, cpu, cuda, opencl)
+	
 	struct Image
 	{
 		std::filesystem::path Path{};
@@ -269,15 +271,79 @@ namespace ImageDatabase
 		float Dot{0};
 	};
 
-	struct ImageFile
+	class Extractor
 	{
-		std::filesystem::path Path{};
-		Thread::Channel<Image>& MessageQueue;
-		std::unordered_set<uint64_t> WhiteList{};
+	public:
+		explicit Extractor(const Device& dev,
+		                   const std::string& protoTxtPath = "vgg16-deploy.prototxt",
+		                   const std::string& caffeModelPath = "vgg16.caffemodel")
+		{
+			const auto loadFile = [](const std::string& file)
+			{
+				try
+				{
+					return File::ReadToEnd(file);
+				}
+				catch (...)
+				{
+					std::throw_with_nested(
+						Exception(
+							String::FormatStr(
+								"[ImageDatabase::Extractor::Extractor::loadFile] [File::ReadToEnd] init '{}' fail",
+								file)));
+				}
+			};
 
+			std::string protoTxt = loadFile(protoTxtPath);
+			std::string caffeModel = loadFile(caffeModelPath);
+
+			vgg16 = cv::dnn::readNetFromCaffe(
+				protoTxt.data(), protoTxt.length(),
+				caffeModel.data(), caffeModel.length());
+
+			if (dev == Device::cpu)
+			{
+				vgg16.setPreferableBackend(cv::dnn::DNN_BACKEND_VKCOM);
+				vgg16.setPreferableTarget(cv::dnn::DNN_TARGET_VULKAN);
+			}
+
+			if (dev == Device::cuda)
+			{
+				vgg16.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
+				vgg16.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
+			}
+
+			if (dev == Device::opencl)
+			{
+				vgg16.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
+				vgg16.setPreferableTarget(cv::dnn::DNN_TARGET_OPENCL);
+			}
+		}
+
+		void Extract(decltype(Image::Vgg16)& out, const cv::Mat& image)
+		{
+			vgg16.setInput(cv::dnn::blobFromImage(image));
+			auto feat = vgg16.forward();
+			feat = feat / norm(feat);
+
+			for (int i = 0; i < 512; ++i)
+			{
+				out(i, 0) = feat.at<float>(0, i, 0);
+			}
+		}
+	private:
+		cv::dnn::Net vgg16;
+	};
+
+	class ImageFile
+	{
+	public:
+		std::filesystem::path Path{};
+		std::unordered_set<uint64_t> WhiteList{};
+		
 		ImageFile() = delete;
 
-		ImageFile(Thread::Channel<Image>& mq, std::filesystem::path path) : Path(std::move(path)), MessageQueue(mq) {}
+		ImageFile(Thread::Channel<Image>& mq, Extractor& extractor, std::filesystem::path path) : Path(std::move(path)), messageQueue(mq), extractor(extractor) {}
 
 		void Parse()
 		{
@@ -289,11 +355,11 @@ namespace ImageDatabase
 
 				zip_error_t error;
 				zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.length(), 0, &error);
-				if (src == nullptr && error.zip_err != ZIP_ER_OK)
+				if (src == nullptr)
 					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_source_buffer_create] {}", __Detail::LibzipErrStr(error)));
 
 				zip_t* za = zip_open_from_source(src, ZIP_RDONLY, &error);
-				if (za == nullptr && error.zip_err != ZIP_ER_OK)
+				if (za == nullptr)
 				{
 					throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_open_from_source] {}", __Detail::LibzipErrStr(error)));
 				}
@@ -314,7 +380,7 @@ namespace ImageDatabase
 						if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
 						{
 							auto* const zf = zip_fopen_index(za, i, 0);
-							if (const auto err = zip_get_error(za); zf == nullptr && err != ZIP_ER_OK)
+							if (const auto err = zip_get_error(za); zf == nullptr)
 								throw Exception(String::FormatStr("[ImageDatabase::ImageFile::ImageFile] [zip_fopen_index] {}", __Detail::LibzipErrStr(*err)));
 
 							std::string buf(zs.size, 0);
@@ -345,6 +411,9 @@ namespace ImageDatabase
 		}
 
 	private:
+		Thread::Channel<Image>& messageQueue;
+		Extractor& extractor;
+		
 		void(*log)(const std::string&) = nullptr;
 
 		void LoadFile(const std::filesystem::path& path)
@@ -413,8 +482,6 @@ namespace ImageDatabase
 						nullptr, codecParams->width, codecParams->height, codecCtx->pix_fmt,
 						dstWidth, dstHeight, dstPixFmt, 0, nullptr, nullptr, nullptr);
 					if (!swsCtx) throw Exception("[ImageDatabase::ImageFile::LoadImage] [sws_getCachedContext] NULL");
-
-					
 				}
 
 				frame = av_frame_alloc();
@@ -498,7 +565,7 @@ namespace ImageDatabase
 						
 						sws_scale(swsCtx, decFrame->data, decFrame->linesize, 0, decFrame->height, frame->data, frame->linesize);
 						
-						MessageQueue.Write(ProcImage(index == 0 ? path : path / *Convert::ToString(index), frameBuf, frame->linesize[0]));
+						messageQueue.Write(ProcImage(index == 0 ? path : path / *Convert::ToString(index), frameBuf, frame->linesize[0]));
 						index++;
 					}
 					av_packet_unref(pkt);
@@ -521,7 +588,7 @@ namespace ImageDatabase
 		}
 
 		[[nodiscard]] Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int lineSize) const
-		{
+		{			
 			Image out{};
 			out.Path = path;
 			if (log != nullptr)
@@ -533,46 +600,10 @@ namespace ImageDatabase
 			std::copy_n(md5Str.begin(), 32, out.Md5.begin());
 			if (log != nullptr) log(md5Str);
 
-			static const auto LoadFile = [](const char* file)
-			{
-				try
-				{
-					return File::ReadToEnd(file);
-				}
-				catch(...)
-				{
-					std::throw_with_nested(
-						Exception(
-							String::FormatStr(
-								"[ImageDatabase::ImageFile::ProcImage::loadFile] [File::ReadToEnd] init '{}' fail",
-								file)));
-				}
-			};
-
-			static std::string protoTxt = LoadFile("vgg16-deploy.prototxt");
-			static std::string caffeModel = LoadFile("vgg16.caffemodel");
-
-			static auto vgg16 = []()
-			{
-				auto vgg16 = cv::dnn::readNetFromCaffe(
-					protoTxt.data(), protoTxt.length(),
-					caffeModel.data(), caffeModel.length());
-				vgg16.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
-				vgg16.setPreferableTarget(cv::dnn::DNN_TARGET_OPENCL);
-				return vgg16;
-			}();
-
 			const cv::Mat image(224, 224, CV_8UC3, (void*)buf.data(), lineSize);
 			//cv::imshow("", image);
 			//cv::waitKey(0);
-			vgg16.setInput(cv::dnn::blobFromImage(image));
-			auto feat = vgg16.forward();
-			feat = feat / norm(feat);
-
-			for (int i = 0; i < 512; ++i)
-			{
-				out.Vgg16(i, 0) = feat.template at<float>(0, i, 0);
-			}
+			extractor.Extract(out.Vgg16, image);
 			if (log != nullptr) log(*Convert::ToString(out.Vgg16(0, 0)));
 
 			return out;
@@ -596,7 +627,7 @@ namespace ImageDatabase
 			const auto fsBuf = std::make_unique<char[]>(4096);
 			fs.rdbuf()->pubsetbuf(fsBuf.get(), 4096);
 
-			Serialization::Deserialize deser(fs);
+			Serialization::Deserialize deSer(fs);
 			while (fs)
 			{
 				Image img{};
@@ -604,10 +635,10 @@ namespace ImageDatabase
 				std::string p;
 				try
 				{
-					auto [raw] = deser.Read<std::string>();
+					auto [raw] = deSer.Read<std::string>();
 					p = raw;
 				}
-				catch (Serialization::Eof)
+				catch (Serialization::Eof&)
 				{
 					break;
 				}
@@ -674,6 +705,6 @@ namespace ImageDatabase
 		std::optional<std::function<void(std::string)>> log = std::nullopt;
 
 	public:
-		std::vector<Image> Images;
+		std::vector<Image> Images{};
 	};
 }
