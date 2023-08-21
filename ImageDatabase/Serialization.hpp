@@ -166,6 +166,28 @@ namespace Serialization
                     std::throw_with_nested(Eof("[Serialization::Serialize::WriteImpl<" + std::string(typeid(T).name()) + ">] len == NULL"));
                 }
 			}
+            else if constexpr (std::is_same_v<T, std::vector<char>>
+                || std::is_same_v<T, std::vector<char8_t>>)
+            {
+                try
+                {
+                    const uint64_t len = val.size();
+
+                    if constexpr (ToStr)
+                    {
+                        __Detail::WriteArithmeticStr(fs, len);
+                        fs.write((char*)val.data(), len);
+                        return;
+                    }
+
+                    __Detail::WriteArithmetic(fs, len);
+                    fs.write((char*)val.data(), len);
+                }
+                catch (Eof)
+                {
+                    std::throw_with_nested(Eof("[Serialization::Serialize::WriteImpl<" + std::string(typeid(T).name()) + ">] len == NULL"));
+                }
+            }
 			else
 			{
                 fs << val;
@@ -232,6 +254,21 @@ namespace Serialization
                 fs.read(&buf[0], len);
                 return buf;
 			}
+            else if constexpr (std::is_same_v<T, std::vector<char>> || std::is_same_v<T, std::vector<char8_t>>)
+            {
+                uint64_t len;
+                if constexpr (FromStr)
+                {
+                    len = __Detail::ReadArithmeticStr<uint64_t>(fs);
+                }
+                else
+                {
+                    len = __Detail::ReadArithmetic<uint64_t>(fs);
+                }
+                std::vector<typename T::value_type> buf(len);
+                fs.read((char*)buf.data(), len);
+                return buf;
+            }
 			else
 			{
                 T val;

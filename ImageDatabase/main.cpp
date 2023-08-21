@@ -9,191 +9,310 @@
 #include <chrono>
 #include <regex>
 
-extern "C"
+// extern "C"
+// {
+// #include <libavutil/avutil.h>
+// }
+
+// #include "Arguments.h"
+// #include "Convert.h"
+// #include "ImageDatabase.h"
+// #include "StdIO.h"
+// #include "Thread.h"
+// #include "Log.h"
+// #include "Algorithm.h"
+// #include "Requires.h"
+// #include "Time.h"
+// #include "Function.h"
+
+#include "Enum/Enum.hpp"
+#include "Arguments/Arguments.hpp"
+
+#include "ImageDatabase.hpp"
+#include "StdIO/StdIO.hpp"
+
+#include "Algorithm.hpp"
+
+#include <nlohmann/json.hpp>
+#include <range/v3/view.hpp>
+
+MakeEnum(Operator, build, query);
+
+struct BuildParam
 {
-#include <libavutil/avutil.h>
-}
+	std::filesystem::path DbPath;
+	ImageDatabase::Device Dev;
+	std::filesystem::path BuildPath;
+	std::unordered_set<std::u8string> ExtBlackList;
+	std::unordered_map<std::u8string, ImageDatabase::Decoder> ExtDecoderList;
+	size_t ThreadNum;
+	std::unordered_set<std::u8string> ZipList;
+};
 
-#include "Arguments.h"
-#include "Convert.h"
-#include "ImageDatabase.h"
-#include "StdIO.h"
-#include "Thread.h"
-#include "Log.h"
-#include "Algorithm.h"
-#include "Requires.h"
-#include "Time.h"
-#include "Function.h"
-
-static_assert(Requires::Require(Requires::Version, { 1, 0, 0, 0 }));
-static_assert(Requires::Require(Algorithm::Version, { 1, 0, 0, 0 }));
-static_assert(Requires::Require(ArgumentsParse::Version, { 1, 0, 0, 0 }));
-static_assert(Requires::Require(Bit::Version, { 1, 0, 0, 0 }));
-static_assert(Requires::Require(Convert::Version, { 1, 0, 0, 0 }));
-static_assert(Requires::Require(Cryptography::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(File::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(Function::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(Serialization::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(Console::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(String::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(Thread::Version, { 1,0,0,0 }));
-static_assert(Requires::Require(Time::Version, { 1, 0, 0, 0 }));
-
-ArgumentOption(Operator, build, query)
-
-#define CatchEx
-
-struct LogMsg
+template<bool Mt = false>
+void BuildCore(const BuildParam& param)
 {
-	decltype(std::chrono::system_clock::now()) Time;
-	const char* File;
-	decltype(__LINE__) Line;
-	const char* Function;
-	std::u16string Message;
-}; 
+	ImageDatabase::Database db{};
+	if (exists(param.DbPath)) db.Load(param.DbPath);
+	LogInfo("database size: {}", db.Images.Data.size());
 
-static Logger<LogMsg> Log;
-#define LogImpl(level, func, ...) Log.Write<level>(std::chrono::system_clock::now(), "main.cpp", __LINE__, func, String::FormatU16str(__VA_ARGS__))
-#define LogNone(func, ...) LogImpl(LogLevel::None, func, __VA_ARGS__)
-#define LogErr(func, ...) LogImpl(LogLevel::Error, func, __VA_ARGS__)
-#define LogWarn(func, ...) LogImpl(LogLevel::Warn, func, __VA_ARGS__)
-#define LogLog(func, ...) LogImpl(LogLevel::Log, func, __VA_ARGS__)
-#define LogInfo(func, ...) LogImpl(LogLevel::Info, func, __VA_ARGS__)
-#define LogDebug(func, ...) LogImpl(LogLevel::Debug, func, __VA_ARGS__)
-
-static void LogExceptionImpl(std::vector<std::string>& out, const std::exception& e, const int level)
-{
-	out.push_back(String::FormatStr("{}{}", std::string(level * 2, ' '), e.what()));
-	try
+	if constexpr (Mt)
 	{
-		std::rethrow_if_nested(e);
+		CuThread::Channel<std::optional<ImageDatabase::Reader::LoadType>, CuThread::Dynamics> mq{};
+		mq.DynLimit = param.ThreadNum;
+		CuThread::Synchronize push([&]<typename T0, typename T1, typename T2>(T0 && p, T1 && m, T2 && v) {
+			db.Images.Set(
+				std::forward<T0>(p), std::forward<T1>(m), std::forward<T2>(v));
+		});
+
+		ImageDatabase::Reader reader([&](ImageDatabase::Reader::LoadType&& data)
+			{
+				mq.Write(std::move(data));
+			}, param.BuildPath);
+		reader.ExtBlackList = param.ExtBlackList;
+		reader.ExtDecoderList = param.ExtDecoderList;
+		reader.ZipList = param.ZipList;
+
+		std::vector<std::thread> threads(param.ThreadNum);
+		for (auto& t : threads)
+		{
+			t = std::thread([&]
+				{
+					ImageDatabase::Extractor extractor(param.Dev);
+
+					while (true)
+					{
+						auto i = mq.Read();
+						if (!i) break;
+
+						LogInfo("scan: {}", std::visit(CuUtility::Variant::Visitor{
+							[](const ImageDatabase::Reader::PathType& info)
+							{
+								return info;
+							},
+								[](const ImageDatabase::Reader::MemoryType& info)
+							{
+								return info.Path;
+							}
+						}, * i));
+						reader.Process([&]<typename T0, typename T1, typename T2>(T0 && p, T1 && m, T2 && v) {
+							push(
+								std::forward<T0>(p), std::forward<T1>(m),
+								std::forward<T2>(v));
+						}, extractor, * i);
+					}
+				});
+		}
+
+		reader.Read();
+
+		for (auto& _ : threads) mq.Write({});
+		for (auto& t : threads) t.join();
 	}
-	catch(const std::exception& ex)
+	else
 	{
-		LogExceptionImpl(out, ex, level + 1);
+		ImageDatabase::Extractor extractor(param.Dev);
+		ImageDatabase::Reader reader([&](ImageDatabase::Reader::LoadType&& data)
+			{
+				LogInfo("scan: {}", std::visit(CuUtility::Variant::Visitor{
+					[](const ImageDatabase::Reader::PathType& info)
+					{
+						return info;
+					},
+						[](const ImageDatabase::Reader::MemoryType& info)
+					{
+						return info.Path;
+					}
+				}, data));
+				reader.Process([&]<typename T0, typename T1, typename T2>(T0&& p, T1&& m, T2&& v) {
+					db.Images.Set(std::forward<T0>(p), std::forward<T1>(m), std::forward<T2>(v));
+				}, extractor, data);
+			}, param.BuildPath);
+		reader.ExtBlackList = param.ExtBlackList;
+		reader.ExtDecoderList = param.ExtDecoderList;
+		reader.ZipList = param.ZipList;
+
+		reader.Read();
 	}
+
+	LogInfo("save database : {}", param.DbPath);
+	db.Save(param.DbPath);
+	LogInfo("database size: {}", db.Images.Data.size());
 }
 
-std::string LogException(const std::exception& e)
+int main(int argc, const char* argv[])
 {
-	std::vector<std::string> out{};
-	LogExceptionImpl(out, e, 0);
-	return String::JoinStr(out.begin(), out.end(), "\n");
-}
-
-decltype(auto) LogTime(const decltype(LogMsg::Time)& time)
-{
-	auto t = std::chrono::system_clock::to_time_t(time);
-	tm local{};
-	Time::Local(&local, &t);
-	std::ostringstream ss;
-	ss << std::put_time(&local, "%F %X");
-	return ss.str();
-}
-
-int main(int argc, char* argv[])
-{
-	const auto toStr = [](const auto& x) { return std::string(x); };
-	ArgumentsParse::Argument<Operator> opArg
+	Args::EnumArgument<Operator, true> opArg
 	{
 		"",
-		"operator " + OperatorDesc(),
-		Function::Combine(toStr, ToOperator)
+		"operator " + String::ToString(Enum::StringValues<Operator>())
 	};
-	ArgumentsParse::Argument<std::filesystem::path> dbArg
+	Args::Argument<std::filesystem::path, 1, true> dbArg
 	{
 		"-d",
 		"database path"
 	};
-	ArgumentsParse::Argument<std::filesystem::path> pathArg
+	Args::Argument<std::filesystem::path> pathArg
 	{
 		"-i",
 		"input path"
 	};
-	ArgumentsParse::Argument<float> thresholdArg
+	Args::Argument<double> thresholdArg
 	{
 		"-t",
 		"threshold [0.0, 1.0] {0.8}",
 		0.8f,
 		[](const auto& value)
 		{
-			const auto val = *Convert::FromString<float>(value);
+			const auto val = *Convert::FromString<double>(value);
 			if (!(val >= 0.0f && val <= 1.0f))
-				throw ArgumentsParse::ConvertException(String::FormatStr("[main::thresholdArg::convert] [main.cpp:{}] range error", __LINE__));
+				throw Args::ConvertException(CuUtility::String::Combine("[", __FUNCTION__, "] [", CuUtility_Filename, ":", CuUtility_LineString, "] out of range").data());
 			return val;
 		}
 	};
-	ArgumentsParse::Argument<std::unordered_set<uint64_t>> whiteListArg
+	Args::Argument<size_t> threadLimitArg
 	{
-		"--white",
-		"white list: 'index1;index2;...'",
-		[](const auto& value)
+		"--threads",
+		"threads (0 = hardware concurrency) (build only)",
+		1,
+		[](const auto& val)
 		{
-			const auto vf = std::string(value) + ";";
-			const std::regex re(R"([^;]+?;)");
-			auto begin = std::sregex_iterator(vf.begin(), vf.end(), re);
-			const auto end = std::sregex_iterator();
-			std::unordered_set<uint64_t> wl{};
-			for (auto i = begin; i != end; ++i)
-			{
-				const auto match = i->str();
-				const auto f = match.substr(0, match.length() - 1);
-				wl.emplace(*Convert::FromString<uint64_t>(f));
-			}
-			return wl;
+			const auto ret = Convert::FromString<size_t>(val).value();
+			return ret == 0 ? std::thread::hardware_concurrency() : ret;
 		}
 	};
-	ArgumentsParse::Argument<ImageDatabase::Device> deviceArg
+	Args::EnumArgument deviceArg
 	{
 		"--device",
-		String::FormatStr("device {}", ImageDatabase::DeviceDesc(ToString(ImageDatabase::Device::cpu))),
-		ImageDatabase::Device::cpu,
-		Function::Combine(toStr, ImageDatabase::ToDevice)
+		String::Format("device {}", Enum::StringValues<ImageDatabase::Device>()),
+		ImageDatabase::Device::cuda
 	};
-	ArgumentsParse::Argument<LogLevel> logLevelArg
+	Args::Argument<std::unordered_set<std::u8string>> ignoreExtArg
+	{
+		"--ignore",
+		R"(ignore file exts. example: "ext,...". default: "txt")",
+		std::unordered_set<std::u8string>{u8".txt"},
+		[](const auto& val)
+		{
+			std::unordered_set<std::u8string> buf;
+			String::Split(String::ToU8String(val), u8',', [&](const auto& v)
+				{
+					buf.emplace(String::FormatU8(".{}", String::ToLowerU8(v)));
+				});
+			return buf;
+		},
+		[](const auto& val)
+		{
+			std::vector<std::string> ret{};
+			std::transform(val.begin(), val.end(), std::back_inserter(ret), String::ToString<std::u8string>);
+			return nlohmann::to_string(nlohmann::json(ret));
+		}
+	};
+	Args::Argument<std::unordered_set<std::u8string>> zipExtArg
+	{
+		"--zip",
+			R"(zip file exts. default: "zip,7z,rar,gz,xz")",
+			std::unordered_set<std::u8string>{u8".zip", u8".7z", u8".rar", u8".gz", u8".xz"},
+			[](const auto& val)
+		{
+			std::unordered_set<std::u8string> buf;
+			String::Split(String::ToU8String(val), u8',', [&](const auto& v)
+				{
+					buf.emplace(String::FormatU8(".{}", String::ToLowerU8(v)));
+				});
+			return buf;
+		},
+			[](const auto& val)
+		{
+			std::vector<std::string> ret{};
+			std::transform(val.begin(), val.end(), std::back_inserter(ret), String::ToString<std::u8string>);
+			return nlohmann::to_string(nlohmann::json(ret));
+		}
+	};
+	Args::Argument<std::unordered_map<std::u8string, ImageDatabase::Decoder>> decoderSpecArg
+	{
+		"--decoder",
+			String::Format(R"(decoder{} spec. example: "ext=FFmpeg,...". default: "nef=DirectXTex")", Enum::StringValues<ImageDatabase::Decoder>()),
+			std::unordered_map<std::u8string, ImageDatabase::Decoder>{{u8".nef", ImageDatabase::Decoder::DirectXTex}},
+			[](const auto& val)
+		{
+			std::unordered_map<std::u8string, ImageDatabase::Decoder> buf;
+			String::Split(String::ToU8String(val), u8',', [&](const auto& kvStr)
+				{
+					std::u8string k{};
+					ImageDatabase::Decoder v{};
+					String::Split(kvStr, u8'=', [&, i=0](const auto& vs) mutable
+					{
+						switch (i)
+						{
+						case 0:
+							k = String::ToLowerU8(String::FormatU8(".{}", vs));
+							return;
+						case 1:
+							v = Enum::FromString<ImageDatabase::Decoder>(String::ToString(vs));
+							return;
+						default:
+							throw Args::ConvertException(CuUtility::String::Combine("[", __FUNCTION__, "] [", CuUtility_Filename, ":", CuUtility_LineString, "] parse error").data());
+						}
+					});
+					buf[k] = v;
+				});
+			return buf;
+		},
+			[](const auto& val)
+		{
+			std::string buf = "{";
+				for (const auto& [k, v] : val)
+				{
+					String::AppendsTo(buf, "\"", String::ToString(k), "\"", ":", Enum::ToString(v), ",");
+				}
+				if (buf[buf.length() - 1] == ',') buf.erase(buf.length() - 1);
+				buf.append("}");
+				return buf;
+		}
+	};
+	Args::EnumArgument logLevelArg
 	{
 		"--loglevel",
-		"log level " + LogLevelDesc(ToString(LogLevel::Info)),
+			String::Format("log level {}", Enum::StringValues<LogLevel>()),
 		LogLevel::Info,
-		Function::Combine(toStr, ToLogLevel)
 	};
-	ArgumentsParse::Argument<std::filesystem::path> logFileArg
+	Args::Argument logFileArg
 	{
 		"--logfile",
 		"log file path",
-		""
+		std::filesystem::path{}
 	};
-#undef ArgumentsFunc
 	
-	auto args = ArgumentsParse::Arguments{}
-		.Add(opArg)
-		.Add(dbArg)
-		.Add(pathArg)
-		.Add(thresholdArg)
-		.Add(whiteListArg)
-		.Add(deviceArg)
-		.Add(logLevelArg)
-		.Add(logFileArg);
+	auto args = Args::Arguments{};
+	args.Add(opArg
+		,dbArg
+		,pathArg
+		,thresholdArg
+		,threadLimitArg
+		,deviceArg
+		,ignoreExtArg
+		,zipExtArg
+		,decoderSpecArg
+		,logLevelArg
+		,logFileArg);
 
-	const auto usage = [&]() { return String::FormatStr("Usage:\n{}\n{}", argv[0], args.GetDesc()); };
+	const auto usage = [&] { return String::Format("Usage:\n{}\n{}", argv[0], args.GetDesc()); };
 
-#ifdef CatchEx
 	try
-#endif
 	{
-		std::thread logThread;
 		args.Parse(argc, argv);
+	}
+	catch (const std::exception& ex)
+	{
+		Console::Error::WriteLine(ex.what());
+		Console::Error::WriteLine(usage());
+	}
 
-		LogInfo("main", "\n{}", args.GetValuesDesc({
-			args.GetValuesDescConverter<std::string>([](const auto& x) { return x; }),
-			args.GetValuesDescConverter<std::filesystem::path>([](const auto& x) { return x.string(); }),
-			args.GetValuesDescConverter<Operator>([](const auto& x) { return ToString(x); }),
-			args.GetValuesDescConverter<LogLevel>([](const auto& x) { return ToString(x); }),
-			args.GetValuesDescConverter<float>([](const auto& x) { return *Convert::ToString(x); }),
-			args.GetValuesDescConverter<ImageDatabase::Device>([](const auto & x) { return ToString(x); })
-		}));
-
+		std::thread logThread;
 		const auto logLevel = args.Value(logLevelArg);
+		ImageDatabase::Log.Level = logLevel;
+		LogInfo("\n{}", args.GetValuesDesc());
 
 		av_log_set_level([&]()
 		{
@@ -214,35 +333,73 @@ int main(int argc, char* argv[])
 
 		av_log_set_callback([](void* avc, int ffLevel, const char* fmt, va_list vl)
 		{
-			static char buf[4096]{ 0 };
-			int ret = 1;
-			av_log_format_line2(avc, ffLevel, fmt, vl, buf, 4096, &ret);
-			auto data = std::filesystem::u8path(buf).u16string();
-			if (ffLevel <= 16) LogErr("main::av", data);
-			else if (ffLevel <= 24) LogWarn("main::av", data);
-			else if (ffLevel <= 32) LogLog("main::av", data);
-			else LogDebug("main::av", data);
+			LogLevel outLv = LogLevel::Info;
+			if (ffLevel <= AV_LOG_ERROR) outLv = LogLevel::Error;
+			else if (ffLevel <= AV_LOG_WARNING) outLv = LogLevel::Warn;
+			else if (ffLevel <= AV_LOG_INFO) outLv = LogLevel::Info;
+			else if (ffLevel <= AV_LOG_TRACE) outLv = LogLevel::Debug;
+
+			if (outLv <= ImageDatabase::Log.Level)
+			{
+				int bufSize = 4096;
+				std::unique_ptr<char[]> buf;
+
+				while (true)
+				{
+					buf = std::make_unique<char[]>(bufSize);
+					int prefix = 1;
+					const auto ret = av_log_format_line2(avc, ffLevel, fmt, vl, buf.get(), bufSize, &prefix);
+					if (ret < 0)
+					{
+						LogErr("[av_log_format_line2] {}", CuVid::_Detail::AV::AvStrError(ret));
+						return;
+					}
+					if (ret < bufSize)
+					{
+						break;
+					}
+
+					bufSize *= 2;
+				}
+
+				std::u8string_view bv(reinterpret_cast<const char8_t*>(buf.get()));
+				switch (outLv)
+				{
+				case LogLevel::Error:
+					LogErr("{}", bv);
+					break;
+				case LogLevel::Warn:
+					LogWarn("{}", bv);
+					break;
+				case LogLevel::Verb:
+					LogVerb("{}", bv);
+					break;
+				case LogLevel::Debug:
+					LogDebug("{}", bv);
+					break;
+				default:
+					LogInfo("{}", bv);
+					break;
+				}
+			}
 		});
 
 		cv::redirectError([](const int status, const char* funcName, const char* errMsg,
 			const char* fileName, const int line, void*)
 		{
-			LogErr("main::cv", "[{}:{}] [{}] error {}: {}", fileName, line, funcName, status, errMsg);
+			LogErr("[{}:{}] [{}] error {}: {}", fileName, line, funcName, status, errMsg);
 			return 0;
 		});
 		
 		logThread = std::thread([](const LogLevel& level, std::filesystem::path logFile)
 		{
-			Log.level = level;
 			std::ofstream fs;
 			if (!logFile.empty())
 			{
 				fs.open(logFile);
-				const auto buf = std::make_unique<char[]>(4096);
-				fs.rdbuf()->pubsetbuf(buf.get(), 4096);
 				if (!fs)
 				{
-					LogErr("main::logThread", "log file '{}': open fail", logFile.u16string());
+					LogErr("log file '{}': open fail", logFile.u16string());
 					logFile = "";
 				}
 			}
@@ -252,27 +409,26 @@ int main(int argc, char* argv[])
 				{ LogLevel::None, Console::Color::White },
 				{ LogLevel::Error, Console::Color::Red },
 				{ LogLevel::Warn, Console::Color::Yellow },
-				{ LogLevel::Log, Console::Color::White },
-				{ LogLevel::Info, Console::Color::Blue },
-				{ LogLevel::Debug, Console::Color::Gray }
+				{ LogLevel::Info, Console::Color::White },
+				{ LogLevel::Verb, Console::Color::Gray },
+				{ LogLevel::Debug, Console::Color::Blue }
 			};
 
 			while (true)
 			{
-				const auto [level, raw] = Log.Chan.Read();
-				const auto& [time, file, line, func, msg] = raw;
+				const auto [level, raw] = ImageDatabase::Log.Chan.Read();
+				const auto& [time, src, msg] = raw;
 
-				auto out = String::FormatU16str("[{}] [{}] [{}:{}] [{}] {}", ToString(level), LogTime(time), file, line, func, msg);
-				if (out[out.length() - 1] == u'\n') out.erase(out.length() - 1);
-				const auto outU8 = std::filesystem::path(out).u8string();
+				auto out = String::FormatU8("[{}] [{}] {}{}", Enum::ToString(level), ImageDatabase::Detail::LogTime(time), src, msg);
+				if (out[out.length() - 1] == u8'\n') out.erase(out.length() - 1);
 
 				SetForegroundColor(colorMap.at(level));
-				Console::WriteLine(outU8);
+				Console::WriteLine(String::ToDirtyUtf8StringView(out));
 
 				
 				if (!logFile.empty())
 				{
-					fs << outU8 << std::endl;
+					fs << String::ToDirtyUtf8StringView(out) << std::endl;
 					fs.flush();
 				}
 
@@ -286,78 +442,33 @@ int main(int argc, char* argv[])
 
 		try
 		{
-			static const auto LogForward = [](const std::string& u8Msg)
-			{
-				LogDebug("main::LogForward", std::filesystem::u8path(u8Msg).u16string());
-			};
-			
+			const auto extBlackList = args.Value(ignoreExtArg);
+			const auto extDecoderList = args.Value(decoderSpecArg);
+			const auto zipList = args.Value(zipExtArg);
 			std::unordered_map<Operator, std::function<void()>>
 			{
-				{Operator::build, [&]()
+				{Operator::build, [&]
 				{
-					const auto dbPath = args.Value(dbArg);
-					const auto buildPath = args.Value(pathArg);
-					const auto whiteList = args.Get(whiteListArg);
-					const auto dev = args.Value(deviceArg);
-
-					ImageDatabase::Extractor extractor(dev);
-					
-					ImageDatabase::Database db{};
-					if (logLevel >= LogLevel::Info) db.SetLog(LogForward);
-					if (exists(dbPath)) db.Load(dbPath);
-					LogInfo("main::build", "database size: {}", db.Images.size());
-
-					Thread::Channel<ImageDatabase::Image> mq{};
-
-					std::thread receiver([](decltype(Log)& Log, Thread::Channel<ImageDatabase::Image>& queue, ImageDatabase::Database& database)
+					const BuildParam param
+						{
+							args.Value(dbArg),
+							args.Value(deviceArg),
+							args.Value(pathArg),
+							extBlackList,
+							extDecoderList,
+							args.Value(threadLimitArg),
+							zipList
+						};
+					if (param.ThreadNum == 1)
 					{
-						while (true)
-						{
-							auto i = queue.Read();
-							const auto& [p, m, v, _] = i;
-							if (p.empty()) break;
-							LogInfo("main::build::receiver", "{ path: {}; md5: {}; vgg16.[0]: {}; }", p.u16string(), std::string_view(m.data(), 32), v(0, 0));
-							database.Images.push_back(std::move(i));
-						}
-					}, std::ref(Log), std::ref(mq), std::ref(db));
-
-					std::error_code ec;
-					std::filesystem::recursive_directory_iterator rec(buildPath, ec);
-					for (const auto& file : rec)
-					{
-						if (ec != std::error_code{})
-						{
-							LogErr("main::build", "[std::filesystem::recursive_directory_iterator] path '{}': {}", file.path().u16string(), ec.message());
-							rec.pop();
-							continue;
-						}
-						if (file.is_regular_file())
-						{
-							try
-							{
-								const auto& filePath = file.path();
-								LogInfo("main::build", "load file '{}'", filePath.u16string());
-								ImageDatabase::ImageFile img(mq, extractor, filePath);
-								if (whiteList.has_value()) img.WhiteList = *whiteList;
-								if (logLevel >= LogLevel::Debug) img.SetLog(LogForward);
-								img.Parse();
-							}
-							catch(const std::exception& e)
-							{
-								LogErr("main::build", LogException(e));
-							}
-							
-						}
+						BuildCore<false>(param);
 					}
-
-					mq.Write({});
-					receiver.join();
-					
-					LogLog("main::build", "save database: {}", dbPath.u16string());
-					db.Save(dbPath);
-					LogLog("main::build", "database size: {}", db.Images.size());
+					else
+					{
+						BuildCore<true>(param);
+					}
 				}},
-				{Operator::query, [&]()
+				{Operator::query, [&]
 				{
 					const auto dbPath = args.Value(dbArg);
 					const auto input = args.Value(pathArg);
@@ -366,33 +477,59 @@ int main(int argc, char* argv[])
 
 					ImageDatabase::Extractor extractor(dev);
 
-					LogInfo("main::query", "load database: {}", dbPath.u16string());
-					ImageDatabase::Database db(dbPath);
-					if (logLevel >= LogLevel::Debug) db.SetLog(LogForward);
+					LogInfo("load database: {}", dbPath);
+					ImageDatabase::Database<ImageDatabase::VectorContainer> db(dbPath);
+					db.Images.Data.shrink_to_fit();
 
-					Thread::Channel<ImageDatabase::Image> mq{};
-					
-					LogInfo("main::query", "database size: {}", db.Images.size());
+					LogInfo("database size: {}", db.Images.Data.size());
 
-					LogInfo("main::query", "load file: {}", input.u16string());
-					ImageDatabase::ImageFile file(mq, extractor, input);
-					if (logLevel >= LogLevel::Debug) file.SetLog(LogForward);
-					file.WhiteList = { 0 };
-					file.Parse();
-					const auto img = mq.Read();
+					LogInfo("load file: {}", input);
 
-					LogInfo("main::query", "search start ...");
-
-					Algorithm::ForEach<true>(db.Images.begin(), db.Images.end(), [&](auto& x) { x.Dot = x.Vgg16.dot(img.Vgg16); });
-					Algorithm::Sort<true>(db.Images.begin(), db.Images.end(), [](const auto& a, const auto& b)
-						{ return std::greater()(a.Dot, b.Dot); });
-
-					LogInfo("main::query", "search done.");
-					for (const auto& [p, _, _unused, v] : db.Images)
+					ImageDatabase::VectorContainer images{};
+					ImageDatabase::Reader reader([&](ImageDatabase::Reader::LoadType&& data)
 					{
-						if (v >= threshold)
+						if (images.Data.empty())
 						{
-							LogLog("main::query", "found '{}': {}", p.u16string(), v);
+							reader.Process([&]<typename T0, typename T1, typename T2>(T0&& p, T1&& m, T2&& v) { images.Set(
+								                               std::forward<T0>(p), std::forward<T1>(m),
+								                               std::forward<T2>(v)); }, extractor, data);
+						}
+					}, input);
+					reader.ExtBlackList = extBlackList;
+					reader.ExtDecoderList = extDecoderList;
+					reader.ZipList = zipList;
+					reader.Read();
+
+					LogInfo("search start ...");
+					const auto& img = images.Data[0];
+					using CacheType = std::tuple<const ImageDatabase::ImageInfo*, float>;
+					std::vector<CacheType> cache(db.Images.Data.size());
+					std::transform(std::execution::par_unseq, db.Images.Data.begin(), db.Images.Data.end(), cache.begin(),
+						[&](const ImageDatabase::ImageInfo& v) { return CacheType(&v, v.Vgg16.dot(img.Vgg16)); });
+					
+					std::sort(std::execution::par_unseq, cache.begin(), cache.end(), [&](const auto& a, const auto& b)
+					{
+							return std::greater()(std::get<1>(a), std::get<1>(b));
+					});
+
+					LogInfo("search done.");
+					for (const auto& [pImg, val] : cache)
+					{
+						if (val >= threshold)
+						{
+							LogInfo("found '{}': {}", pImg->Path, val);
+							if (const auto pv = std::u8string_view(pImg->Path.data(), pImg->Path.size()); exists(std::filesystem::path(pv)))
+							{
+								std::string ps{};
+								try
+								{
+									ps = String::ToString(ps);
+								}
+								catch (...)
+								{
+								}
+								cv::imshow(ps.empty() ? String::ToDirtyUtf8String(pv) : ps, val);
+							}
 						}
 						else
 						{
@@ -404,19 +541,12 @@ int main(int argc, char* argv[])
 		}
 		catch (const std::exception& ex)
 		{
-			LogErr("main", LogException(ex));
-			LogLog("main", usage());
+			LogErr("{}", ex.what());
+			LogInfo(usage());
 		}
 
-		LogNone("main", "{ok}.");
+		LogNone("{ok}.");
 
 		logThread.join();
-	}
-#ifdef CatchEx
-	catch (const std::exception& e)
-	{
-		Console::Error::WriteLine(LogException(e));
-		Console::Error::WriteLine(usage());
-	}
-#endif
+	
 }
