@@ -35,6 +35,7 @@
 
 #include <nlohmann/json.hpp>
 #include <range/v3/view.hpp>
+#include <boost/config.hpp>
 
 #ifndef _MSC_VER
 #include <unistd.h>
@@ -147,6 +148,9 @@ void BuildCore(const BuildParam &param)
 
 int main(int argc, const char *argv[])
 {
+	Console::WriteLine("ImageDatabase version \"" __DATE__ " " __TIME__ "\" Copyright (c) 2020-2023 iriszero");
+	Console::WriteLine("  built with " BOOST_PLATFORM "/" BOOST_COMPILER);
+
 	Args::EnumArgument<Operator, true> opArg{
 		"",
 		"operator " + String::ToString(Enum::StringValues<Operator>())};
@@ -385,9 +389,9 @@ int main(int argc, const char *argv[])
 			while (true)
 			{
 				const auto [level, raw] = ImageDatabase::Log.Chan.Read();
-				const auto& [time, src, msg] = raw;
+				const auto& [time, thId, src, msg] = raw;
 
-				auto out = String::FormatU8("[{}] [{}] {}{}", Enum::ToString(level), ImageDatabase::Detail::LogTime(time), src, msg);
+				auto out = String::FormatU8("[{}] [{}] [{}] {}{}", Enum::ToString(level), ImageDatabase::Detail::LogTime(time), thId, src, msg);
 				if (out[out.length() - 1] == u8'\n') out.erase(out.length() - 1);
 
 				SetForegroundColor(colorMap.at(level));

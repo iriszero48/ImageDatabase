@@ -52,6 +52,7 @@ namespace ImageDatabase
 	struct LogMsg
 	{
 		decltype(std::chrono::system_clock::now()) Time;
+		decltype(std::this_thread::get_id()) ThreadId;
 		std::string Source;
 		std::u8string Message;
 	};
@@ -74,6 +75,7 @@ namespace ImageDatabase
 #define LogImpl(level, ...)\
 	if((int)level <= (int)ImageDatabase::Log.Level) ImageDatabase::Log.Write<level>(\
 		std::chrono::system_clock::now(),\
+		std::this_thread::get_id(),\
 		std::string(CuUtility::String::Combine("[", CuUtility_Filename, ":", CuUtility_LineString "] [", __FUNCTION__ , "] ").data()),\
 		String::FormatU8(__VA_ARGS__))
 #define LogNone(...) LogImpl(LogLevel::None, __VA_ARGS__)
