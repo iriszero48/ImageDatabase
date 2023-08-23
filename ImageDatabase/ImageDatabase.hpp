@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <execution>
 #include <bit>
+#include <format>
 
 #include <eigen3/Eigen/Eigen>
 #include <opencv2/core.hpp>
@@ -70,17 +71,17 @@ namespace ImageDatabase
 		}
 	}
 
-#define LogImpl(level, fmt, ...)\
+#define LogImpl(level, ...)\
 	if((int)level <= (int)ImageDatabase::Log.Level) ImageDatabase::Log.Write<level>(\
 		std::chrono::system_clock::now(),\
 		std::string(CuUtility::String::Combine("[", CuUtility_Filename, ":", CuUtility_LineString "] [", __FUNCTION__ , "] ").data()),\
-		String::FormatU8(fmt, __VA_ARGS__))
-#define LogNone(fmt, ...) LogImpl(LogLevel::None, fmt, __VA_ARGS__)
-#define LogErr(fmt, ...) LogImpl(LogLevel::Error, fmt, __VA_ARGS__)
-#define LogWarn(fmt, ...) LogImpl(LogLevel::Warn, fmt, __VA_ARGS__)
-#define LogInfo(fmt, ...) LogImpl(LogLevel::Info, fmt, __VA_ARGS__)
-#define LogVerb(fmt, ...) LogImpl(LogLevel::Verb, fmt, __VA_ARGS__)
-#define LogDebug(fmt, ...) LogImpl(LogLevel::Debug, fmt, __VA_ARGS__)
+		String::FormatU8(__VA_ARGS__))
+#define LogNone(...) LogImpl(LogLevel::None, __VA_ARGS__)
+#define LogErr(...) LogImpl(LogLevel::Error, __VA_ARGS__)
+#define LogWarn(...) LogImpl(LogLevel::Warn, __VA_ARGS__)
+#define LogInfo(...) LogImpl(LogLevel::Info, __VA_ARGS__)
+#define LogVerb(...) LogImpl(LogLevel::Verb, __VA_ARGS__)
+#define LogDebug(...) LogImpl(LogLevel::Debug, __VA_ARGS__)
 
 	class Exception : public std::runtime_error
 	{
@@ -92,17 +93,17 @@ namespace ImageDatabase
 		using Exception::Exception;
 	};
 
-#define ID_MakeExceptImpl(ex, fmt, ...) \
-	Exception(\
+#define ID_MakeExceptImpl(ex, ...) \
+	ex(\
 		String::Appends(\
 			CuUtility::String::Combine(\
 				"[", #ex, "] "\
 				"[",CuUtility_Filename,":",CuUtility_LineString,"] "\
 				"[", __FUNCTION__, "] ").data(),\
-			std::format(fmt, __VA_ARGS__), "\n",\
+			std::format(__VA_ARGS__), "\n",\
 			boost::stacktrace::to_string(boost::stacktrace::stacktrace())))
-#define ID_MakeExcept(fmt, ...) ID_MakeExceptImpl(Exception, fmt, __VA_ARGS__)
-#define ID_MakeApiExcept(api, fmt, ...) ID_MakeExceptImpl(ApiException, "[{}] {}", api, std::format(fmt, __VA_ARGS__))
+#define ID_MakeExcept(...) ID_MakeExceptImpl(ImageDatabase::Exception, __VA_ARGS__)
+#define ID_MakeApiExcept(api, ...) ID_MakeExceptImpl(ImageDatabase::ApiException, "[{}] {}", api, std::format(__VA_ARGS__))
 	
 	namespace Detail
 	{
@@ -293,7 +294,7 @@ namespace ImageDatabase
 
 		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
-			Data.emplace_back(path, md5, vgg16);
+            Data.push_back(ImageInfo{path, md5, vgg16});
 		}
 	};
 
@@ -503,7 +504,7 @@ namespace ImageDatabase
 						LogErr("{}: {}", filePath, ex.what());
 					}
 				}
-				if (passed == 0) throw ID_MakeExcept("nop");
+				if (passed == 0) throw ID_MakeExcept("{}", "nop");
 		}
 
 		template <typename SetFunc>
@@ -554,6 +555,7 @@ namespace ImageDatabase
 		template <typename SetFunc>
 		static void ProcessWithDirectXTex(SetFunc&& set, Extractor& extractor, const std::filesystem::path& filePath, const std::span<const uint8_t>& fileData)
 		{
+#ifdef _MSC_VER
 			std::filesystem::path dxPath;
 			bool useTmp = false;
 			if (fileData.empty())
@@ -584,6 +586,9 @@ namespace ImageDatabase
 				set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
 			}
 			if (useTmp) std::filesystem::remove(dxPath);
+#else
+            throw ID_MakeExcept("{}", "not impl");
+#endif
 		}
 
 	public:
@@ -698,7 +703,7 @@ namespace ImageDatabase
 		void Load(const std::filesystem::path& dbPath)
 		{
 			std::ifstream fs(dbPath, std::ios::in | std::ios::binary);
-			if (!fs) throw ID_MakeApiExcept("std::ifstream::operator!", "return false: open database failed");
+			if (!fs) throw ID_MakeApiExcept("std::ifstream::operator!","{}", "return false: open database failed");
 
 			Serialization::Deserialize deSer(fs);
 			while (fs)

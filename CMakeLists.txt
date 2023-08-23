@@ -11,29 +11,47 @@ option(CU_ROOT "CppUtility Root Path" "CppUtility")
 cmake_print_variables(CU_ROOT)
 file(GLOB_RECURSE CU_FILES "${CU_ROOT}/*.h" "${CU_ROOT}/*.hpp")
 
-# find_package(Threads REQUIRED)
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
-# find_package(Boost REQUIRED COMPONENTS context)
 find_package(FFMPEG REQUIRED)
-# find_package(TBB CONFIG REQUIRED)
 find_package(Boost REQUIRED)
 find_package(unofficial-graphicsmagick CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(range-v3 CONFIG REQUIRED)
-find_package(directxtex CONFIG REQUIRED)
+
+set(ID_LIBS
+    Eigen3::Eigen
+    opencv_core opencv_imgcodecs opencv_dnn opencv_highgui
+    libzip::zip
+    ${FFMPEG_LIBRARIES}
+    unofficial::graphicsmagick::graphicsmagick
+    nlohmann_json nlohmann_json::nlohmann_json
+    range-v3::range-v3
+)
+
+set(ID_DEFS
+    UNICODE
+    _UNICODE    
+
+    CU_IMG_HAS_OPENCV
+    CU_IMG_HAS_GRAPHICSMAGICK
+)
+
+if (WIN32)
+    find_package(directxtex CONFIG REQUIRED)
+    list(APPEND ID_DEFS CU_IMG_HAS_DIRECTXTEX)
+    list(APPEND ID_LIBS Microsoft::DirectXTex)
+endif()
+
+if (UNIX)
+    find_package(TBB CONFIG REQUIRED)
+    list(APPEND ID_LIBS TBB::tbb)
+endif()
 
 add_executable(imgdb "ImageDatabase/ImageDatabase.hpp" "ImageDatabase/main.cpp" ${CU_FILES})
 
-target_compile_definitions(imgdb PRIVATE
-    CU_IMG_HAS_OPENCV
-    CU_IMG_HAS_GRAPHICSMAGICK
-    CU_IMG_HAS_DIRECTXTEX
-
-    UNICODE
-    _UNICODE
-)
+target_compile_definitions(imgdb PRIVATE ${ID_DEFS})
 
 target_include_directories(imgdb PRIVATE
     "ImageDatabase"
@@ -41,18 +59,4 @@ target_include_directories(imgdb PRIVATE
     ${CU_ROOT}
 )
 
-target_link_libraries(imgdb PRIVATE
-    # Threads::Threads
-    Eigen3::Eigen
-    opencv_core opencv_imgcodecs opencv_dnn opencv_highgui
-    libzip::zip
-    # Boost::boost Boost::context
-    ${FFMPEG_LIBRARIES}
-    # TBB::tbb
-    unofficial::graphicsmagick::graphicsmagick
-    nlohmann_json nlohmann_json::nlohmann_json
-    range-v3::range-v3
-    Microsoft::DirectXTex
-)
-
-# set_target_properties(imgdb PROPERTIES LINKER_LANGUAGE CXX)
+target_link_libraries(imgdb PRIVATE ${ID_LIBS})

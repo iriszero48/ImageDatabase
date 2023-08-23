@@ -371,3 +371,7 @@ build
 
 # OS X
 .DS_Store
+
+# JB Build
+.idea
+cmake-build-*

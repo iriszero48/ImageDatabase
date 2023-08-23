@@ -230,7 +230,7 @@ namespace Serialization
                     constexpr auto size = sizeof(T) * 2;
                     std::string buf(size, 0);
                     fs.read(buf.data(), size);
-                    std::stringstream ss(size);
+                    std::stringstream ss(buf);
                     T val;
                     ss >> std::hex >> val;
                     return val;
