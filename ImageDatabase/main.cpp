@@ -9,6 +9,12 @@
 #include <chrono>
 #include <regex>
 
+#ifndef __cpp_lib_execution
+#define ParallelUseTbb
+#endif
+
+#include "Parallel/Parallel.hpp"
+
 // extern "C"
 // {
 // #include <libavutil/avutil.h>
@@ -616,7 +622,7 @@ int main(int argc, const char *argv[])
 				ImageDatabase::Database<ImageDatabase::VectorContainer> db(dbPath);
 				LogInfo("database size: {}", db.Images.Data.size());
 
-				std::for_each(std::execution::par_unseq, db.Images.Data.begin(), db.Images.Data.end(), [&](decltype(db.Images.Data)::value_type & v)
+				Parallel::ForEach(db.Images.Data.begin(), db.Images.Data.end(), [&](decltype(db.Images.Data)::value_type & v)
 				{
 					const auto p = String::ToDirtyUtf8StringView(std::u8string_view(v.Path.data(), v.Path.size()));
 					std::vector<char> buf;
@@ -696,11 +702,11 @@ int main(int argc, const char *argv[])
 				 const auto &img = images.Data[0];
 				 using CacheType = std::tuple<const ImageDatabase::ImageInfo *, float>;
 				 std::vector<CacheType> cache(db.Images.Data.size());
-				 std::transform(std::execution::par_unseq, db.Images.Data.begin(), db.Images.Data.end(), cache.begin(),
+				 Parallel::Map(db.Images.Data.begin(), db.Images.Data.end(), cache.begin(),
 								[&](const ImageDatabase::ImageInfo &v)
 								{ return CacheType(&v, v.Vgg16.dot(img.Vgg16)); });
 
-				 std::sort(std::execution::par_unseq, cache.begin(), cache.end(), [&](const auto &a, const auto &b)
+				 Parallel::Sort(cache.begin(), cache.end(), [&](const auto &a, const auto &b)
 						   { return std::greater()(std::get<1>(a), std::get<1>(b)); });
 
 				 LogInfo("search done.");

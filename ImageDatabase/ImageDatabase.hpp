@@ -248,11 +248,6 @@ namespace ImageDatabase
 	template <typename T>
 	struct IContainer
 	{
-		[[nodiscard]] decltype(auto) Get(const PathType& key)
-		{
-			return static_cast<T*>(this)->Get(key);
-		}
-
 		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
 			static_cast<T*>(this)->Set(path, md5, vgg16);
@@ -272,12 +267,6 @@ namespace ImageDatabase
 	public:
 		std::unordered_map<PathType, std::tuple<Md5Type, Vgg16Type>, MapContainerHasher> Data;
 
-		[[nodiscard]] ImageInfo Get(const PathType& key) const
-		{
-			const auto d = Data.find(key);
-			return { d->first, std::get<0>(d->second), std::get<1>(d->second) };
-		}
-
 		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
 			Data[path] = std::make_tuple(md5, vgg16);
@@ -287,12 +276,6 @@ namespace ImageDatabase
 	struct VectorContainer : public IContainer<VectorContainer>
 	{
 		std::vector<ImageInfo> Data{};
-
-		[[nodiscard]] ImageInfo& Get(const PathType& key)
-		{
-			const auto it = std::find_if(std::execution::par_unseq, Data.begin(), Data.end(), [&](const auto& val) { return val.Path == key; });
-			return *it;
-		}
 
 		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
