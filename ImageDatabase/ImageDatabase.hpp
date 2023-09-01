@@ -105,7 +105,7 @@ namespace ImageDatabase
 			String::Format(__VA_ARGS__), "\n",\
 			boost::stacktrace::to_string(boost::stacktrace::stacktrace())))
 #define ID_MakeExcept(...) ID_MakeExceptImpl(ImageDatabase::Exception, __VA_ARGS__)
-#define ID_MakeApiExcept(api, ...) ID_MakeExceptImpl(ImageDatabase::ApiException, "[{}] {}", api, std::format(__VA_ARGS__))
+#define ID_MakeApiExcept(api, ...) ID_MakeExceptImpl(ImageDatabase::ApiException, "[{}] {}", api, String::Format(__VA_ARGS__))
 	
 	namespace Detail
 	{
