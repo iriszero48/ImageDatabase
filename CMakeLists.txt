@@ -49,6 +49,10 @@ if (UNIX)
     list(APPEND ID_LIBS TBB::tbb)
 endif()
 
+if (APPLE)
+    list(APPEND ID_DEFS _GNU_SOURCE)
+endif()
+
 add_executable(imgdb "ImageDatabase/ImageDatabase.hpp" "ImageDatabase/main.cpp" ${CU_FILES})
 
 target_compile_definitions(imgdb PRIVATE ${ID_DEFS})
