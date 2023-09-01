@@ -313,7 +313,7 @@ namespace ImageDatabase
 
 		using HandlerType = std::function<void(LoadType&&)>;
 	private:
-		std::filesystem::path buildPath{};
+		std::vector<std::filesystem::path> buildPaths{};
 		HandlerType handler{};
 
 	public:
@@ -323,14 +323,19 @@ namespace ImageDatabase
 		
 		Reader() = delete;
 
-		Reader(HandlerType&& handler , std::filesystem::path path) : buildPath(std::move(path)), handler(std::move(handler)) {}
+		Reader(HandlerType&& handler , std::vector<std::filesystem::path> paths) : buildPaths(std::move(paths)), handler(std::move(handler)) {}
 
 		void Read()
 		{
-			LoadPath(buildPath);
+			LoadPaths(buildPaths);
 		}
 
 	private:
+		void LoadPaths(const std::vector<std::filesystem::path>& paths)
+		{
+			for (const auto& p : paths) LoadPath(p);
+		}
+
 		void LoadPath(const std::filesystem::path& path)
 		{
 			if (is_directory(path))
