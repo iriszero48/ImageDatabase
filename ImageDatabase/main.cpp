@@ -273,7 +273,7 @@ CuArgs::Argument<> OutputDatabaseNameArg
 
 CuArgs::Argument<> OutputTableNameArg
 {
-	"-table",
+	"--table",
 	"table name. default: images",
 	"images"
 };
