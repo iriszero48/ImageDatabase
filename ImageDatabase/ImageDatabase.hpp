@@ -16,6 +16,7 @@
 #include <zip.h>
 #include <boost/stacktrace.hpp>
 #include <opencv2/highgui.hpp>
+#include <nlohmann/json.hpp>
 
 #include "Utility/Utility.hpp"
 #include "String/String.hpp"
@@ -29,23 +30,7 @@
 #include "Bit/Bit.hpp"
 #include "Image/File.hpp"
 
-// extern "C"
-// {
-// #include <zip.h>
-// 	
-// #include <libavformat/avformat.h>
-// #include <libavcodec/avcodec.h>
-// #include <libavutil/avutil.h>
-// #include <libavutil/imgutils.h>
-// #include <libswscale/swscale.h>
-// }
-// 
-// #include "Cryptography.h"
-// #include "String.h"
-// #include "File.h"
 #include "Serialization.hpp"
-// #include "Bit.h"
-// #include "Thread.h"
 
 namespace ImageDatabase
 {
@@ -57,15 +42,15 @@ namespace ImageDatabase
 		std::u8string Message;
 	};
 
-	static Logger<LogMsg> Log;
+	static CuLog::Logger<LogMsg> Log;
 
 	namespace Detail
 	{
-		decltype(auto) LogTime(const decltype(LogMsg::Time)& time)
+		inline decltype(auto) LogTime(const decltype(LogMsg::Time)& time)
 		{
 			auto t = std::chrono::system_clock::to_time_t(time);
 			tm local{};
-			Time::Local(&local, &t);
+			CuTime::Local(&local, &t);
 			std::ostringstream ss;
 			ss << std::put_time(&local, "%F %X");
 			return ss.str();
@@ -76,14 +61,14 @@ namespace ImageDatabase
 	if((int)level <= (int)ImageDatabase::Log.Level) ImageDatabase::Log.Write<level>(\
 		std::chrono::system_clock::now(),\
 		std::this_thread::get_id(),\
-		std::string(CuUtility::String::Combine("[", CuUtility_Filename, ":", CuUtility_LineString "] [", __FUNCTION__ , "] ").data()),\
-		String::FormatU8(__VA_ARGS__))
-#define LogNone(...) LogImpl(LogLevel::None, __VA_ARGS__)
-#define LogErr(...) LogImpl(LogLevel::Error, __VA_ARGS__)
-#define LogWarn(...) LogImpl(LogLevel::Warn, __VA_ARGS__)
-#define LogInfo(...) LogImpl(LogLevel::Info, __VA_ARGS__)
-#define LogVerb(...) LogImpl(LogLevel::Verb, __VA_ARGS__)
-#define LogDebug(...) LogImpl(LogLevel::Debug, __VA_ARGS__)
+		std::string(CuUtil::String::Combine("[", CuUtil_Filename, ":", CuUtil_LineString "] [", __FUNCTION__ , "] ").data()),\
+		CuStr::FormatU8(__VA_ARGS__))
+#define LogNone(...) LogImpl(CuLog::LogLevel::None, __VA_ARGS__)
+#define LogErr(...) LogImpl(CuLog::LogLevel::Error, __VA_ARGS__)
+#define LogWarn(...) LogImpl(CuLog::LogLevel::Warn, __VA_ARGS__)
+#define LogInfo(...) LogImpl(CuLog::LogLevel::Info, __VA_ARGS__)
+#define LogVerb(...) LogImpl(CuLog::LogLevel::Verb, __VA_ARGS__)
+#define LogDebug(...) LogImpl(CuLog::LogLevel::Debug, __VA_ARGS__)
 
 	class Exception : public std::runtime_error
 	{
@@ -97,15 +82,15 @@ namespace ImageDatabase
 
 #define ID_MakeExceptImpl(ex, ...) \
 	ex(\
-		String::Appends(\
-			CuUtility::String::Combine(\
+		CuStr::Appends(\
+			CuUtil::String::Combine(\
 				"[", #ex, "] "\
-				"[",CuUtility_Filename,":",CuUtility_LineString,"] "\
+				"[",CuUtil_Filename,":",CuUtil_LineString,"] "\
 				"[", __FUNCTION__, "] ").data(),\
-			String::Format(__VA_ARGS__), "\n",\
+			CuStr::Format(__VA_ARGS__), "\n",\
 			boost::stacktrace::to_string(boost::stacktrace::stacktrace())))
 #define ID_MakeExcept(...) ID_MakeExceptImpl(ImageDatabase::Exception, __VA_ARGS__)
-#define ID_MakeApiExcept(api, ...) ID_MakeExceptImpl(ImageDatabase::ApiException, "[{}] {}", api, String::Format(__VA_ARGS__))
+#define ID_MakeApiExcept(api, ...) ID_MakeExceptImpl(ImageDatabase::ApiException, "[{}] {}", api, CuStr::Format(__VA_ARGS__))
 	
 	namespace Detail
 	{
@@ -118,7 +103,7 @@ namespace ImageDatabase
 				buf.append("system error: ");
 				if (se == 1) buf.append("ZIP_ET_SYS");
 				else if (se == 2) buf.append("ZIP_ET_ZLIB");
-				else buf.append(*Convert::ToString(se));
+				else buf.append(*CuConv::ToString(se));
 				buf.append(", ");
 			}
 
@@ -132,18 +117,50 @@ namespace ImageDatabase
 		}
 	}
 
-	MakeEnumDef(Device, cpu, cuda, opencl);
-	MakeEnumDef(Decoder, FFmpeg, GraphicsMagick, DirectXTex);
+	CuEnum_MakeEnumDef(Device, cpu, cuda, opencl);
+	CuEnum_MakeEnumDef(Decoder, FFmpeg, GraphicsMagick, DirectXTex);
 
 	using PathType = std::vector<char8_t>;
 	using Md5Type = std::array<char, 32>;
 	using Vgg16Type = Eigen::Matrix<float, 512, 1>;
 
+	using RawMd5Type = std::array<std::uint8_t, 16>;
+
 	struct ImageInfo
 	{
-		PathType Path;
-		Md5Type Md5;
-		Vgg16Type Vgg16;
+		PathType Path{};
+		Md5Type Md5{};
+		Vgg16Type Vgg16{};
+
+		static std::u8string_view PathU8String(const PathType& path)
+		{
+			return std::u8string_view(path.data(), path.size());
+		}
+
+		static std::string_view Md5String(const Md5Type& md5)
+		{
+			return std::string_view(md5.data(), md5.size());
+		}
+
+		static RawMd5Type RawMd5(const Md5Type& md5)
+		{
+			RawMd5Type ret{};
+			for (size_t i = 0; i < ret.size(); ++i)
+			{
+				ret[i] = CuConv::FromString<uint8_t>(std::string_view(md5.data() + i * 2, 2), 16).value();
+			}
+			return ret;
+		}
+
+		static std::span<float, 512> Vgg16Span(const Vgg16Type& vgg16)
+		{
+			return std::span<float, 512>(const_cast<float*>(vgg16.data()), 512);
+		}
+
+		static std::string Vgg16String(const Vgg16Type& vgg16)
+		{
+			return nlohmann::json(Vgg16Span(vgg16)).dump();
+		}
 	};
 
 	class Extractor
@@ -160,7 +177,7 @@ namespace ImageDatabase
 			{
 				try
 				{
-					return File::ReadAllBytes(file);
+					return CuFile::ReadAllBytes(file);
 				}
 				catch (...)
 				{
@@ -205,7 +222,7 @@ namespace ImageDatabase
 
 		Md5Type Md5(const CuImg::ImageBGR_OpenCV& img)
 		{
-			Crypto::Md5 md5;
+			CuCrypto::Md5 md5;
 			const auto linesize = img.Linesize();
 			const auto usedSize = CuImg::CuBGR::ColorSize() * img.Width();
 			const auto height = img.Height();
@@ -245,31 +262,135 @@ namespace ImageDatabase
 		}
 	};
 
+#define ID_MakeImageUnpackParams(p, m, v) const PathType& p, const Md5Type& m, const Vgg16Type& v
 	template <typename T>
 	struct IContainer
 	{
-		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
+		[[nodiscard]] size_t Size() const
 		{
-			static_cast<T*>(this)->Set(path, md5, vgg16);
+			return static_cast<T*>(this)->Size();
 		}
-	};
 
-	struct MapContainerHasher
-	{
-		size_t operator()(const PathType& val) const
+		void ForEach(std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func)
 		{
-			return std::hash<std::u8string_view>{}(std::u8string_view(val.data(), val.size()));
+			static_cast<T*>(this)->ForEach(func);
+		}
+
+		void ForEach(std::function<void(ImageInfo&)>&& func)
+		{
+			static_cast<T*>(this)->ForEach(func);
+		}
+
+		void ParallelForEach(std::function<void(ImageInfo&)>&& func)
+		{
+			static_cast<T*>(this)->ParallelForEach(func);
+		}
+
+		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
+		{
+			static_cast<T*>(this)->Append(std::move(path), std::move(md5), std::move(vgg16));
+		}
+
+		void Get(const size_t idx, std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func, const std::any& param)
+		{
+			static_cast<T*>(this)->Get(idx, func, param);
+		}
+
+		template <typename Func>
+		bool DeserializeOne(std::ifstream& fs, Serialization::Deserialize& deSer, Func&& func)
+		{
+			PathType path;
+			try
+			{
+				auto [p] = deSer.Read<PathType>();
+				path = std::move(p);
+			}
+			catch (Serialization::Eof&)
+			{
+				return false;
+			}
+			LogVerb("path: {}", std::u8string_view(path.data(), path.size()));
+
+			Md5Type md5{};
+			fs.read(md5.data(), md5.size());
+			LogVerb("md5: {}", std::string_view(md5.data(), md5.size()));
+
+			Vgg16Type vgg16;
+			fs.read(reinterpret_cast<char*>(vgg16.data()), sizeof(float) * 512);
+			if constexpr (std::endian::big == std::endian::native)
+			{
+				auto ptr = vgg16.data();
+				for (auto i = 0; i < 512; ++i)
+				{
+					ptr[i] = CuBit::ByteSwap(ptr[i]);
+				}
+			}
+			LogVerb("vgg16: {}, {}, {}, ...", vgg16[0], vgg16[1], vgg16[2]);
+
+			func(std::move(path), std::move(md5), std::move(vgg16));
+			return true;
+		}
+
+		void Deserialize(const std::filesystem::path& dbPath)
+		{
+			std::ifstream fs(dbPath, std::ios::in | std::ios::binary);
+			if (!fs) throw ID_MakeApiExcept("std::ifstream::operator!", "{}", "return false: open database failed");
+
+			Serialization::Deserialize deSer(fs);
+			const auto cb = [&](PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
+				{
+					Append(std::move(path), std::move(md5), std::move(vgg16));
+				};
+			while (fs && DeserializeOne(fs, deSer, cb)) {}
+
+			fs.close();
 		}
 	};
 
 	struct MapContainer : public IContainer<MapContainer>
 	{
-	public:
+		struct MapContainerHasher
+		{
+			size_t operator()(const PathType& val) const
+			{
+				return std::hash<std::u8string_view>{}(std::u8string_view(val.data(), val.size()));
+			}
+		};
+
 		std::unordered_map<PathType, std::tuple<Md5Type, Vgg16Type>, MapContainerHasher> Data;
 
-		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
+		void ForEach(std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func)
+		{
+			for (const auto& [first, second] : Data)
+			{
+				const auto& [m, v] = second;
+				func(first, m, v);
+			}
+		}
+
+		void ForEach(std::function<void(ImageInfo&)>&& func) const
+		{
+			throw ID_MakeExcept("not impl");
+		}
+
+		void ParallelForEach(std::function<void(ImageInfo&)>&& func) const
+		{
+			throw ID_MakeExcept("not impl");
+		}
+
+		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
 			Data[path] = std::make_tuple(md5, vgg16);
+		}
+
+		[[nodiscard]] size_t Size() const
+		{
+			return Data.size();
+		}
+
+		void Get(const size_t idx, std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func, const std::any& param)
+		{
+			throw ID_MakeExcept("not impl");
 		}
 	};
 
@@ -277,9 +398,125 @@ namespace ImageDatabase
 	{
 		std::vector<ImageInfo> Data{};
 
-		void Set(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
+		void ForEach(std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func)
+		{
+			for (const auto& [p, m, v] : Data)
+			{
+				func(p, m, v);
+			}
+		}
+
+		void ForEach(std::function<void(ImageInfo&)>&& func)
+		{
+			std::ranges::for_each(Data, func);
+		}
+
+		void ParallelForEach(std::function<void(ImageInfo&)>&& func)
+		{
+			std::for_each(std::execution::par_unseq, Data.begin(), Data.end(), func);
+		}
+
+		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
             Data.push_back(ImageInfo{path, md5, vgg16});
+		}
+
+		[[nodiscard]] size_t Size() const
+		{
+			return Data.size();
+		}
+
+		void Get(const size_t idx, std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func, const std::any&)
+		{
+			const auto& [p, m, v] = Data[idx];
+			func(p, m, v);
+		}
+	};
+
+	struct LazyContainer : public IContainer<LazyContainer>
+	{
+		std::vector<uint64_t> Data{};
+		std::filesystem::path DbPath{};
+
+		void ForEach(std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func)
+		{
+			auto fs = Open();
+
+			Serialization::Deserialize deSer(fs);
+
+			for (const uint64_t offset : Data)
+			{
+				fs.seekg(offset);
+				DeserializeOne(fs, deSer, func);
+			}
+		}
+
+		[[nodiscard]] std::ifstream Open(const std::filesystem::path& path) const
+		{
+			std::ifstream fs(path, std::ios::in | std::ios::binary);
+			if (!fs) throw ID_MakeApiExcept("std::ifstream::operator!", "{}", "return false: open database failed");
+			return fs;
+		}
+
+		[[nodiscard]] std::ifstream Open() const
+		{
+			return Open(DbPath);
+		}
+
+		void ForEach(std::function<void(ImageInfo&)>&& func) const
+		{
+			throw ID_MakeExcept("not impl");
+		}
+
+		void ParallelForEach(std::function<void(ImageInfo&)>&& func) const
+		{
+			throw ID_MakeExcept("not impl");
+		}
+
+		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16) const
+		{
+			throw ID_MakeExcept("not impl");
+		}
+
+		void Deserialize(const std::filesystem::path& dbPath)
+		{
+			DbPath = dbPath;
+
+			std::ifstream fs(dbPath, std::ios::in | std::ios::binary);
+			if (!fs) throw ID_MakeApiExcept("std::ifstream::operator!", "{}", "return false: open database failed");
+
+			Serialization::Deserialize deSer(fs);
+			while (fs)
+			{
+				PathType path;
+				try
+				{
+					auto [pSize] = deSer.Read<uint64_t>();
+					const uint64_t pos = fs.tellg();
+					Data.push_back(pos - sizeof(uint64_t));
+					fs.seekg(pos + pSize + 32 + sizeof(float) * 512);
+				}
+				catch (Serialization::Eof&)
+				{
+					break;
+				}
+			}
+
+			fs.close();
+		}
+
+		[[nodiscard]] size_t Size() const
+		{
+			return Data.size();
+		}
+
+		void Get(const size_t idx, std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func, const std::any& param)
+		{
+			auto* fs = std::any_cast<std::ifstream*>(param);
+			const auto offset = Data[idx];
+			fs->seekg(offset);
+			Serialization::Deserialize deSer(*fs);
+			DeserializeOne(*fs, deSer, func);
 		}
 	};
 
@@ -294,7 +531,7 @@ namespace ImageDatabase
 		using PathType = std::filesystem::path;
 		using LoadType = std::variant<PathType, MemoryType>;
 
-		using HandlerType = std::function<void(LoadType&&)>;
+		using HandlerType = std::function<void(Reader&, LoadType&&)>;
 	private:
 		std::vector<std::filesystem::path> buildPaths{};
 		HandlerType handler{};
@@ -360,7 +597,7 @@ namespace ImageDatabase
 
 		void LoadFilePath(const std::filesystem::path& path)
 		{
-			const auto ext = String::ToLowerU8(path.extension().u8string());
+			const auto ext = CuStr::ToLowerU8(path.extension().u8string());
 			if (ExtBlackList.contains(ext)) return;
 
 			if (ZipList.contains(ext))
@@ -375,7 +612,7 @@ namespace ImageDatabase
 
 		void LoadZip(const std::filesystem::path& path)
 		{
-			const auto zipFile = File::ReadAllBytes(path);
+			const auto zipFile = CuFile::ReadAllBytes(path);
 
 			zip_error_t error;
 			zip_source_t* src = zip_source_buffer_create(zipFile.data(), zipFile.size(), 0, &error);
@@ -436,9 +673,9 @@ namespace ImageDatabase
 			zip_close(za);
 		}
 
-		void LoadFile(LoadType&& data) const
+		void LoadFile(LoadType&& data)
 		{
-			handler(std::move(data));
+			handler(*this, std::move(data));
 		}
 
 		template <typename SetFunc>
@@ -476,7 +713,7 @@ namespace ImageDatabase
 #endif
 					const auto idx = decoder.GetVideoCodecContext()->frame_number - 1;
 
-					const auto pu8 = idx < 1 ? filePath : filePath / *Convert::ToString(idx);
+					const auto pu8 = idx < 1 ? filePath : filePath / *CuConv::ToString(idx);
 					set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
 					++passed;
 		};
@@ -512,7 +749,7 @@ namespace ImageDatabase
 				{
 					uint8_t* ptr;
 					size_t size;
-					File::ReadAllBytesAsPtr(filePath, &ptr, size);
+					CuFile::ReadAllBytesAsPtr(filePath, &ptr, size);
 					mgData.updateNoCopy(ptr, size);
 				}
 			}
@@ -537,7 +774,7 @@ namespace ImageDatabase
 				buf.Raw() = raw[i];
 
 				auto img = CuImg::ConvertToImageBGR_OpenCV(buf);
-				const auto pu8 = (i < 1 ? filePath : filePath / *Convert::ToString(i));
+				const auto pu8 = (i < 1 ? filePath : filePath / *CuConv::ToString(i));
 				set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
 			}
 		}
@@ -561,8 +798,8 @@ namespace ImageDatabase
 					return tmpDir;
 				}();
 
-				dxPath = tmpDir / String::FormatU8("{}{}", String::FromStream(std::this_thread::get_id(), std::hex), filePath.extension());
-				File::WriteAllBytes(dxPath, fileData.data(), fileData.size_bytes());
+				dxPath = tmpDir / CuStr::FormatU8("{}{}", CuStr::Combine(std::hex, std::this_thread::get_id()), filePath.extension());
+				CuFile::WriteAllBytes(dxPath, fileData.data(), fileData.size_bytes());
 				useTmp = true;
 			}
 			auto raw = CuImg::LoadFile_ImageRGBA_DirectXTex(dxPath);
@@ -572,7 +809,7 @@ namespace ImageDatabase
 				auto& ri = raw.Raw().GetImages()[i];
 
 				auto img = CuImg::ConvertToImageBGR_OpenCV(CuImg::ConvertToConstRef_RGBA(ri.pixels, ri.width, ri.height, ri.rowPitch));
-				const auto pu8 = (i < 1 ? filePath : filePath / *Convert::ToString(i));
+				const auto pu8 = (i < 1 ? filePath : filePath / *CuConv::ToString(i));
 				set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
 			}
 			if (useTmp) std::filesystem::remove(dxPath);
@@ -588,7 +825,7 @@ namespace ImageDatabase
 			std::filesystem::path filePath{};
 			std::span<const uint8_t> fileData{};
 
-			std::visit(CuUtility::Variant::Visitor{
+			std::visit(CuUtil::Variant::Visitor{
 				[&](const PathType& val)
 				{
 					filePath = val;
@@ -600,7 +837,7 @@ namespace ImageDatabase
 				}
 			}, data);
 
-			const auto ext = String::ToLowerU8(filePath.extension().u8string());
+			const auto ext = CuStr::ToLowerU8(filePath.extension().u8string());
 			std::optional<Decoder> specDec{};
 			if (const auto p = ExtDecoderList.find(ext); p != ExtDecoderList.end()) specDec = p->second;
 
@@ -610,7 +847,7 @@ namespace ImageDatabase
 				{
 					if (*specDec != decoder) continue;
 				}
-				LogVerb("using decoder: {}", Enum::ToString(decoder));
+				LogVerb("using decoder: {}", CuEnum::ToString(decoder));
 				if (decoder == Decoder::FFmpeg)
 				{
 					try
@@ -620,7 +857,7 @@ namespace ImageDatabase
 					}
 					catch (const std::exception& ex)
 					{
-						LogErr("{}: {}: {}", Enum::ToString(decoder), filePath, ex.what());
+						LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
 					}
 				}
 				else if (decoder == Decoder::GraphicsMagick)
@@ -632,7 +869,7 @@ namespace ImageDatabase
 					}
 					catch (const std::exception& ex)
 					{
-						LogErr("{}: {}: {}", Enum::ToString(decoder), filePath, ex.what());
+						LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
 					}
 				}
 				else if (decoder == Decoder::DirectXTex)
@@ -644,38 +881,15 @@ namespace ImageDatabase
 					}
 					catch (const std::exception& ex)
 					{
-						LogErr("{}: {}: {}", Enum::ToString(decoder), filePath, ex.what());
+						LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
 					}
 				}
 				else
 				{
-					CuUtility_Assert(false, Exception);
+					CuUtil_Assert(false, Exception);
 				}
 			}
 		}
-
-	private:
-		// [[nodiscard]] Image ProcImage(const std::filesystem::path& path, const std::string& buf, const int lineSize) const
-		// {			
-		// 	Image out{};
-		// 	out.Path = path;
-		// 	if (log != nullptr)
-		// 		log(path.u8string());
-		// 
-		// 	Cryptography::Md5 md5{};
-		// 	md5.Append((uint8_t*)buf.data(), buf.length());
-		// 	const std::string md5Str = md5.Digest();
-		// 	std::copy_n(md5Str.begin(), 32, out.Md5.begin());
-		// 	if (log != nullptr) log(md5Str);
-		// 
-		// 	const cv::Mat image(224, 224, CV_8UC3, (void*)buf.data(), lineSize);
-		// 	//cv::imshow("", image);
-		// 	//cv::waitKey(0);
-		// 	extractor.Extract(out.Vgg16, image);
-		// 	if (log != nullptr) log(*Convert::ToString(out.Vgg16(0, 0)));
-		// 
-		// 	return out;
-		// }
 	};
 
 	template<typename Containor = MapContainer>
@@ -692,85 +906,93 @@ namespace ImageDatabase
 
 		void Load(const std::filesystem::path& dbPath)
 		{
-			std::ifstream fs(dbPath, std::ios::in | std::ios::binary);
-			if (!fs) throw ID_MakeApiExcept("std::ifstream::operator!","{}", "return false: open database failed");
-
-			Serialization::Deserialize deSer(fs);
-			while (fs)
-			{
-				PathType path;
-				try
-				{
-					auto [p] = deSer.Read<PathType>();
-					path = std::move(p);
-				}
-				catch (Serialization::Eof&)
-				{
-					break;
-				}
-				LogVerb("path: {}", std::u8string_view(path.data(), path.size()));
-
-				Md5Type md5{};
-				fs.read(md5.data(), md5.size());
-				LogVerb("md5: {}", std::string_view(md5.data(), md5.size()));
-
-				Vgg16Type vgg16;
-				fs.read(reinterpret_cast<char*>(vgg16.data()), sizeof(float) * 512);
-				if constexpr (std::endian::big == std::endian::native)
-				{
-					auto ptr = vgg16.data();
-					for (auto i = 0; i < 512; ++i)
-					{
-						ptr[i] = Bit::EndianSwap(ptr[i]);
-					}
-				}
-				LogVerb("vgg16: {}, {}, {}, ...", vgg16[0], vgg16[1], vgg16[2]);
-
-				Images.Set(std::move(path), std::move(md5), std::move(vgg16));
-			}
-
-			fs.close();
+			Images.Deserialize(dbPath);
 		}
 
 		static void SaveImage(std::ofstream& fs, const ImageInfo& img)
 		{
+			SaveImage(fs, img.Path, img.Md5, img.Vgg16);
+		}
+
+		static void SaveImage(std::ofstream& fs, const PathType& p, const Md5Type& m, const Vgg16Type& v)
+		{
 			Serialization::Serialize ser(fs);
-			const auto& [path, md5, vgg16] = img;
-			ser.Write(path);
-			fs.write(md5.data(), 32);
-			fs.write(reinterpret_cast<const char*>(vgg16.data()), sizeof(float) * 512);
+			ser.Write(p);
+			fs.write(m.data(), 32);
+			fs.write(reinterpret_cast<const char*>(v.data()), sizeof(float) * 512);
+		}
+
+		static std::ofstream CreateDatabaseFile(const std::filesystem::path& path)
+		{
+			std::ofstream fs(path, std::ios::out | std::ios::binary);
+			if (!fs) throw std::runtime_error("load file: bad stream");
+
+			// const auto fsBuf = std::make_unique<char[]>(4096);
+			// fs.rdbuf()->pubsetbuf(fsBuf.get(), 4096);
+
+			return fs;
 		}
 
 		void Save()
 		{
 			Save(databasePath);
 		}
+
+		void Save(std::ofstream& fs)
+		{
+			Images.ForEach([&](const PathType& p, const Md5Type& m, const Vgg16Type& v)
+				{
+					SaveImage(fs, p, m, v);
+				});
+
+			fs.close();
+		}
 		
 		void Save(const std::filesystem::path& savePath)
 		{
-			std::filesystem::remove(savePath);
-			
-			std::ofstream fs(savePath, std::ios::out | std::ios::binary);
-			if (!fs) throw std::runtime_error("load file: bad stream");
-			const auto fsBuf = std::make_unique<char[]>(4096);
-			fs.rdbuf()->pubsetbuf(fsBuf.get(), 4096);
+			auto fs = CreateDatabaseFile(savePath);
+			Save(fs);
+		}
 
-			if constexpr (std::is_same_v<Containor, MapContainer>)
-			{
-				for (const auto& [k, v] : Images.Data)
-				{
-					SaveImage(fs, ImageInfo{ k, std::get<0>(v), std::get<1>(v) });
-				}
-			}
-			else
-			{
-				for (const auto& img : Images.Data)
-				{
-					SaveImage(fs, img);
-				}
-			}
+		void ForEach(std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func)
+		{
+			Images.ForEach(std::move(func));
+		}
 
-			fs.close();
+		void ForEach(std::function<void(ImageInfo&)>&& func)
+		{
+			Images.ForEach(std::move(func));
+		}
+
+		void ParallelForEach(std::function<void(ImageInfo&)>&& func)
+		{
+			Images.ParallelForEach(std::move(func));
+		}
+
+		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
+		{
+			Images.Append(std::move(path), std::move(md5), std::move(vgg16));
+		}
+
+		template <typename Func>
+		bool DeserializeOne(std::ifstream& fs, Serialization::Deserialize& deSer, Func&& func)
+		{
+			return Images.DeserializeOne(fs, deSer, std::move(func));
+		}
+
+		void Deserialize(const std::filesystem::path& dbPath)
+		{
+			Images.Deserialize(dbPath);
+		}
+
+		[[nodiscard]] size_t Size() const
+		{
+			return Images.Size();
+		}
+
+		void Get(const size_t idx, std::function<void(const PathType&, const Md5Type&, const Vgg16Type&)>&& func, const std::any& param)
+		{
+			Images.Get(idx, std::move(func), param);
 		}
 	private:
 		std::filesystem::path databasePath;
@@ -780,5 +1002,5 @@ namespace ImageDatabase
 	};
 }
 
-MakeEnumSpec(ImageDatabase, Device);
-MakeEnumSpec(ImageDatabase, Decoder);
+CuEnum_MakeEnumSpec(ImageDatabase, Device);
+CuEnum_MakeEnumSpec(ImageDatabase, Decoder);

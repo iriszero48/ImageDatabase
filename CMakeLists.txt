@@ -7,9 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
-option(CU_ROOT "CppUtility Root Path" "CppUtility")
+set(CU_ROOT "CppUtility")
 cmake_print_variables(CU_ROOT)
 file(GLOB_RECURSE CU_FILES "${CU_ROOT}/*.h" "${CU_ROOT}/*.hpp")
+
+option(BUILD_STATIC "static(msvc)" OFF)
+option(USE_LIBPQXX "use libpqxx" ON)
+option(USE_SQLITE3 "use sqlite3" ON)
 
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
@@ -53,6 +57,18 @@ if (APPLE)
     list(APPEND ID_DEFS _GNU_SOURCE)
 endif()
 
+if (${USE_LIBPQXX})
+    find_package(libpqxx CONFIG REQUIRED)
+    list(APPEND ID_DEFS ID_HAS_LIBPQXX)
+    list(APPEND ID_LIBS libpqxx::pqxx)
+endif()
+
+if (${USE_SQLITE3})
+    find_package(unofficial-sqlite3 CONFIG REQUIRED)
+    list(APPEND ID_DEFS ID_HAS_SQLITE3)
+    list(APPEND ID_LIBS unofficial::sqlite3::sqlite3)
+endif()
+
 add_executable(imgdb "ImageDatabase/ImageDatabase.hpp" "ImageDatabase/main.cpp" ${CU_FILES})
 
 target_compile_definitions(imgdb PRIVATE ${ID_DEFS})
@@ -64,3 +80,7 @@ target_include_directories(imgdb PRIVATE
 )
 
 target_link_libraries(imgdb PRIVATE ${ID_LIBS})
+
+if (WIN32 AND ${BUILD_STATIC})
+    set_property(TARGET imgdb PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
