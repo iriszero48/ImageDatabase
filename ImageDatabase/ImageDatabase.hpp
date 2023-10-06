@@ -70,9 +70,9 @@ namespace ImageDatabase
 #define LogVerb(...) LogImpl(CuLog::LogLevel::Verb, __VA_ARGS__)
 #define LogDebug(...) LogImpl(CuLog::LogLevel::Debug, __VA_ARGS__)
 
-	class Exception : public std::runtime_error
+	class Exception : public CuExcept::U8Exception
 	{
-		using std::runtime_error::runtime_error;
+		using CuExcept::U8Exception::U8Exception;
 	};
 
 	class ApiException : public Exception
@@ -80,15 +80,7 @@ namespace ImageDatabase
 		using Exception::Exception;
 	};
 
-#define ID_MakeExceptImpl(ex, ...) \
-	ex(\
-		CuStr::Appends(\
-			CuUtil::String::Combine(\
-				"[", #ex, "] "\
-				"[",CuUtil_Filename,":",CuUtil_LineString,"] "\
-				"[", __FUNCTION__, "] ").data(),\
-			CuStr::Format(__VA_ARGS__), "\n",\
-			boost::stacktrace::to_string(boost::stacktrace::stacktrace())))
+#define ID_MakeExceptImpl(ex, ...) ex(CuStr::FormatU8(__VA_ARGS__), CuStr::ToU8String(#ex))
 #define ID_MakeExcept(...) ID_MakeExceptImpl(ImageDatabase::Exception, __VA_ARGS__)
 #define ID_MakeApiExcept(api, ...) ID_MakeExceptImpl(ImageDatabase::ApiException, "[{}] {}", api, CuStr::Format(__VA_ARGS__))
 	
@@ -118,7 +110,10 @@ namespace ImageDatabase
 	}
 
 	CuEnum_MakeEnumDef(Device, cpu, cuda, opencl);
-	CuEnum_MakeEnumDef(Decoder, FFmpeg, GraphicsMagick, DirectXTex);
+	CuEnum_MakeEnumDef(Decoder,
+		FFmpeg         = 0x0001,
+		GraphicsMagick = 0x0010,
+		DirectXTex     = 0x0100);
 
 	using PathType = std::vector<char8_t>;
 	using Md5Type = std::array<char, 32>;
@@ -217,7 +212,7 @@ namespace ImageDatabase
 			PathType ret(u8size);
 			ret.shrink_to_fit();
 			std::copy_n(u8str.data(), u8size, ret.data());
-			return ret;
+			return std::move(ret);
 		}
 
 		Md5Type Md5(const CuImg::ImageBGR_OpenCV& img)
@@ -242,7 +237,7 @@ namespace ImageDatabase
 
 			Md5Type ret{};
 			std::copy_n(digest.data(), ret.size(), ret.data());
-			return ret;
+			return std::move(ret);
 		}
 
 		Vgg16Type Vgg16(const cv::Mat& image)
@@ -258,11 +253,12 @@ namespace ImageDatabase
 			}
 
 			LogVerb("vgg16: {}, {}, {}, ...", ret(0, 0), ret(1, 0), ret(2, 0));
-			return ret;
+			return std::move(ret);
 		}
 	};
 
-#define ID_MakeImageUnpackParams(p, m, v) const PathType& p, const Md5Type& m, const Vgg16Type& v
+#define ID_MakeImageUnpackConstParams(p, m, v) const PathType& p, const Md5Type& m, const Vgg16Type& v
+#define ID_MakeImageUnpackMoveParams(p, m, v) PathType&& p, Md5Type&& m, Vgg16Type&& v
 	template <typename T>
 	struct IContainer
 	{
@@ -345,6 +341,19 @@ namespace ImageDatabase
 
 			fs.close();
 		}
+
+		static size_t LogSize(ID_MakeImageUnpackConstParams(p, m, v))
+		{
+			const auto pb = p.capacity() * sizeof(PathType::value_type);
+			const auto mb = m.size() * sizeof(Md5Type::value_type);
+			const auto vb = v.size() * sizeof(Vgg16Type::value_type);
+
+			const auto total = pb + mb + vb;
+
+			LogVerb("[path = {}, md5 = {}, vgg16 = {}]. total: {}", pb, mb, vb, total);
+
+			return total;
+		}
 	};
 
 	struct MapContainer : public IContainer<MapContainer>
@@ -380,6 +389,23 @@ namespace ImageDatabase
 
 		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
+			const auto& [it, isInsert] = Data.insert_or_assign(std::move(path), std::make_pair(std::move(md5), std::move(vgg16)));
+			if (CuLog::LogLevel::Verb <= Log.Level)
+			{
+				const auto& p = it->first;
+				const auto& [m, v] = it->second;
+
+				static size_t totalSize = 0;
+				totalSize += LogSize(p, m, v);
+
+				LogVerb("current container({}) [size = {}, bucket_count = {}, alloc* ~= {}, total_used_in_bytes = {}]",
+					isInsert ? u8"insertion" : u8"assignment",
+					Data.size(),
+					Data.bucket_count(),
+					static_cast<size_t>((Data.size() * (sizeof(decltype(Data)::value_type) + sizeof(void*)) + Data.bucket_count() * (sizeof(
+						void*) + sizeof(size_t))) * 1.5),
+					totalSize);
+			}
 			Data[path] = std::make_tuple(md5, vgg16);
 		}
 
@@ -418,7 +444,16 @@ namespace ImageDatabase
 
 		void Append(PathType&& path, Md5Type&& md5, Vgg16Type&& vgg16)
 		{
-            Data.push_back(ImageInfo{path, md5, vgg16});
+			const auto& it = Data.emplace_back(std::move(path), std::move(md5), std::move(vgg16));
+
+			if (CuLog::LogLevel::Verb <= Log.Level)
+			{
+				const auto& [p, m, v] = it;
+
+				static size_t totalSize = 0;
+				totalSize += LogSize(p, m, v);
+				LogVerb("current container [size = {}, capacity = {}, total_used_in_bytes = {}]", Data.size(), Data.capacity(), totalSize);
+			}
 		}
 
 		[[nodiscard]] size_t Size() const
@@ -540,6 +575,7 @@ namespace ImageDatabase
 		std::unordered_set<std::u8string> ExtBlackList{};
 		std::unordered_map<std::u8string, Decoder> ExtDecoderList{};
 		std::unordered_set<std::u8string> ZipList{u8".zip", u8".7z", u8".rar", u8".gz", u8".xz"};
+		std::underlying_type_t<Decoder> DisableDecoder = 0;
 		
 		Reader() = delete;
 
@@ -586,6 +622,14 @@ namespace ImageDatabase
 					try
 					{
 						LoadFilePath(f.path());
+					}
+					catch (const CuExcept::Exception& ex)
+					{
+						LogErr("{}: {}", f.path(), ex.ToString());
+					}
+					catch (const CuExcept::U8Exception& ex)
+					{
+						LogErr("{}: {}", f.path(), ex.ToString());
 					}
 					catch (const std::exception& ex)
 					{
@@ -679,59 +723,53 @@ namespace ImageDatabase
 		}
 
 		template <typename SetFunc>
-		static void ProcessWithFFmpeg(SetFunc&& set, Extractor& extractor, const std::filesystem::path& filePath, const std::span<const uint8_t>& fileData)
+		static void ProcessWithFFmpeg(SetFunc&& set, Extractor& extractor, const std::filesystem::path& filePath,
+		                              const std::span<const uint8_t>& fileData)
 		{
-				CuVid::DecoderBGR decoder{};
-				if (!fileData.empty())
-				{
-					decoder.Config.Input = fileData;
-				}
-				else
-				{
-					decoder.Config.Input = filePath;
-				}
+			CuVid::DecoderBGR decoder{};
+			if (!fileData.empty())
+			{
+				decoder.Config.Input = fileData;
+			}
+			else
+			{
+				decoder.Config.Input = filePath;
+			}
 
-				size_t passed = 0;
-				decoder.Config.VideoHandler = [&](const CuImg::ImageBGR_Ref& raw)
+			size_t passed = 0;
+			decoder.Config.VideoHandler = [&](const CuImg::ImageBGR_Ref& raw)
+			{
+				auto img = CuImg::ConvertToImageBGR_OpenCV(raw);
+
+				const auto idx = decoder.GetVideoCodecContext()->frame_number - 1;
+
+				const auto pu8 = idx < 1 ? filePath : filePath / *CuConv::ToString(idx);
+				set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
+				++passed;
+			};
+
+			decoder.LoadFile();
+			decoder.FindStream();
+			while (!decoder.Eof())
+			{
+				try
 				{
-					auto img = CuImg::ConvertToImageBGR_OpenCV(raw);
-
-#if 0
-					{
-						std::string t{};
-						try
-						{
-							t = String::ToString(filePath);
-						}
-						catch (...)
-						{
-							t = String::ToDirtyUtf8String(filePath.u8string());
-						}
-						cv::imshow(t, img.Raw());
-						cv::waitKey();
+					decoder.Read();
 				}
-#endif
-					const auto idx = decoder.GetVideoCodecContext()->frame_number - 1;
-
-					const auto pu8 = idx < 1 ? filePath : filePath / *CuConv::ToString(idx);
-					set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
-					++passed;
-		};
-
-				decoder.LoadFile();
-				decoder.FindStream();
-				while (!decoder.Eof())
+				catch (const CuExcept::U8Exception& ex)
 				{
-					try
-					{
-						decoder.Read();
-					}
-					catch (const std::exception& ex)
-					{
-						LogErr("{}: {}", filePath, ex.what());
-					}
+					LogErr("{}: {}", filePath, ex.what());
 				}
-				if (passed == 0) throw ID_MakeExcept("{}", "nop");
+				catch (const CuExcept::Exception& ex)
+				{
+					LogErr("{}: {}", filePath, ex.what());
+				}
+				catch (const std::exception& ex)
+				{
+					LogErr("{}: {}", filePath, ex.what());
+				}
+			}
+			if (passed == 0) throw ID_MakeExcept("{}", "nop");
 		}
 
 		template <typename SetFunc>
@@ -841,52 +879,56 @@ namespace ImageDatabase
 			std::optional<Decoder> specDec{};
 			if (const auto p = ExtDecoderList.find(ext); p != ExtDecoderList.end()) specDec = p->second;
 
-			for (constexpr auto decoders = std::array{Decoder::FFmpeg, Decoder::GraphicsMagick, Decoder::DirectXTex}; const auto decoder : decoders)
+			for (constexpr auto decoders = std::array{
+				Decoder::FFmpeg,
+				Decoder::GraphicsMagick,
+				Decoder::DirectXTex}; const auto decoder : decoders)
 			{
 				if (specDec)
 				{
 					if (*specDec != decoder) continue;
 				}
 				LogVerb("using decoder: {}", CuEnum::ToString(decoder));
-				if (decoder == Decoder::FFmpeg)
+
+				try
 				{
-					try
+					if (CuUtil::ToUnderlying(decoder) & DisableDecoder)
+					{
+						LogVerb("disabled.");
+						continue;
+					}
+
+					if (decoder == Decoder::FFmpeg)
 					{
 						ProcessWithFFmpeg(set, extractor, filePath, fileData);
 						return;
 					}
-					catch (const std::exception& ex)
-					{
-						LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
-					}
-				}
-				else if (decoder == Decoder::GraphicsMagick)
-				{
-					try
+					else if (decoder == Decoder::GraphicsMagick)
 					{
 						ProcessWithGraphicsMagick(set, extractor, filePath, fileData);
 						return;
 					}
-					catch (const std::exception& ex)
-					{
-						LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
-					}
-				}
-				else if (decoder == Decoder::DirectXTex)
-				{
-					try
+					else if (decoder == Decoder::DirectXTex)
 					{
 						ProcessWithDirectXTex(set, extractor, filePath, fileData);
 						return;
 					}
-					catch (const std::exception& ex)
+					else
 					{
-						LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
+						CuAssert(false);
 					}
 				}
-				else
+				catch (const CuExcept::Exception& ex)
 				{
-					CuUtil_Assert(false, Exception);
+					LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.ToString());
+				}
+				catch (const CuExcept::U8Exception& ex)
+				{
+					LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.ToString());
+				}
+				catch (const std::exception& ex)
+				{
+					LogErr("{}: {}: {}", CuEnum::ToString(decoder), filePath, ex.what());
 				}
 			}
 		}

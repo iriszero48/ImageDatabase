@@ -11,7 +11,6 @@ set(CU_ROOT "CppUtility")
 cmake_print_variables(CU_ROOT)
 file(GLOB_RECURSE CU_FILES "${CU_ROOT}/*.h" "${CU_ROOT}/*.hpp")
 
-option(BUILD_STATIC "static(msvc)" OFF)
 option(USE_LIBPQXX "use libpqxx" ON)
 option(USE_SQLITE3 "use sqlite3" ON)
 
@@ -40,6 +39,8 @@ set(ID_DEFS
 
     CU_IMG_HAS_OPENCV
     CU_IMG_HAS_GRAPHICSMAGICK
+
+    CU_EXCEPTION_USE_BOOST_STACKTRACE
 )
 
 if (WIN32)
@@ -81,6 +82,6 @@ target_include_directories(imgdb PRIVATE
 
 target_link_libraries(imgdb PRIVATE ${ID_LIBS})
 
-if (WIN32 AND ${BUILD_STATIC})
-    set_property(TARGET imgdb PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+if (WIN32)
+    target_compile_options(imgdb PRIVATE /bigobj)
 endif()

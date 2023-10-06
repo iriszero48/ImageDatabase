@@ -306,6 +306,41 @@ CuArgs::BoolArgument SyncModeArg
 	"sync write"
 };
 
+CuArgs::BoolArgument NoCheckArg
+{
+	"--no-check",
+	"no check",
+	false
+};
+
+CuArgs::Argument<std::underlying_type_t<ImageDatabase::Decoder>> DisableDecoderArgument
+{
+	"--disable-decoders",
+	CuStr::Format("disable decoders. {}", CuEnum::Strings<ImageDatabase::Decoder>()),
+	0,
+	[](const auto& v)
+	{
+		std::underlying_type_t<ImageDatabase::Decoder> buf = 0;
+		CuStr::Split(v, ',', [&](const auto& vs)
+			{
+				buf |= CuUtil::ToUnderlying(CuEnum::TryFromString<ImageDatabase::Decoder>(vs));
+			});
+		return buf;
+	},
+	[](const auto v)
+	{
+		std::vector<std::string> buf{};
+		for (const auto ev : CuEnum::Values<ImageDatabase::Decoder>())
+		{
+			if (CuUtil::ToUnderlying(ev) & v)
+			{
+				buf.emplace_back(CuEnum::ToString(ev));
+			}
+		}
+		return CuStr::Join(buf.begin(), buf.end(), ", ");
+	}
+};
+
 #pragma endregion ArgsDefs
 
 namespace nlohmann
@@ -340,6 +375,7 @@ struct BuildParam
 	size_t ThreadNum;
 	std::unordered_set<std::u8string> ZipList;
 	bool SyncMode;
+	std::underlying_type_t<ImageDatabase::Decoder> DisableDecoder;
 };
 
 std::filesystem::path BuildGetPath(const ImageDatabase::Reader::LoadType& t)
@@ -356,21 +392,15 @@ std::filesystem::path BuildGetPath(const ImageDatabase::Reader::LoadType& t)
 	                  }, t);
 }
 
-template <bool Mt = false>
-void BuildCore(const BuildParam &param)
+template <bool Mt = false, typename Cont>
+void BuildCore(ImageDatabase::Database<Cont>& db, const BuildParam &param)
 {
-	ImageDatabase::Database db{};
-	if (exists(param.DbPath))
-		db.Load(param.DbPath);
-	LogInfo("database size: {}", db.Images.Data.size());
-
 	if constexpr (Mt)
 	{
 		CuThread::Channel<std::optional<ImageDatabase::Reader::LoadType>, CuThread::Dynamics> mq{};
 		mq.DynLimit = param.ThreadNum;
-		CuThread::Synchronize push([&]<typename T0, typename T1, typename T2>(T0 &&p, T1 &&m, T2 &&v)
-								   { db.Images.Append(
-										 std::forward<T0>(p), std::forward<T1>(m), std::forward<T2>(v)); });
+		CuThread::Synchronize push([&](ImageDatabase::PathType && p, ImageDatabase::Md5Type && m, ImageDatabase::Vgg16Type && v)
+								   { db.Append(std::move(p), std::move(m), std::move(v)); });
 
 		ImageDatabase::Reader reader([&](ImageDatabase::Reader& self, ImageDatabase::Reader::LoadType &&data)
 									 { mq.Write(std::move(data)); },
@@ -378,6 +408,7 @@ void BuildCore(const BuildParam &param)
 		reader.ExtBlackList = param.ExtBlackList;
 		reader.ExtDecoderList = param.ExtDecoderList;
 		reader.ZipList = param.ZipList;
+		reader.DisableDecoder = param.DisableDecoder;
 
 		std::vector<std::thread> threads(param.ThreadNum);
 		for (auto& t : threads)
@@ -392,11 +423,9 @@ void BuildCore(const BuildParam &param)
 					if (!i) break;
 
 					LogInfo("scan: {}", BuildGetPath(*i));
-					reader.Process([&]<typename T0, typename T1, typename T2>(T0&& p, T1&& m, T2&& v)
+					reader.Process([&](ImageDatabase::PathType&& p, ImageDatabase::Md5Type&& m, ImageDatabase::Vgg16Type&& v)
 					{
-						push(
-							std::forward<T0>(p), std::forward<T1>(m),
-							std::forward<T2>(v));
+						push(std::move(p), std::move(m), std::move(v));
 					}, extractor, *i);
 				}
 			});
@@ -415,23 +444,43 @@ void BuildCore(const BuildParam &param)
 		ImageDatabase::Reader reader([&](ImageDatabase::Reader& self, ImageDatabase::Reader::LoadType&& data)
 		                             {
 			                             LogInfo("scan: {}", BuildGetPath(data));
-			                             self.Process([&]<typename T0, typename T1, typename T2>(T0&& p, T1&& m, T2&& v)
+			                             self.Process([&](ImageDatabase::PathType&& p, ImageDatabase::Md5Type&& m, ImageDatabase::Vgg16Type&& v)
 			                             {
-				                             db.Images.Append(std::forward<T0>(p), std::forward<T1>(m),
-				                                              std::forward<T2>(v));
+				                             db.Append(std::move(p), std::move(m), std::move(v));
 			                             }, extractor, data);
 		                             },
 		                             param.BuildPath);
 		reader.ExtBlackList = param.ExtBlackList;
 		reader.ExtDecoderList = param.ExtDecoderList;
 		reader.ZipList = param.ZipList;
+		reader.DisableDecoder = param.DisableDecoder;
 
 		reader.Read();
 	}
 
 	LogInfo("save database : {}", param.DbPath);
 	db.Save(param.DbPath);
-	LogInfo("database size: {}", db.Images.Data.size());
+	LogInfo("database size: {}", db.Size());
+}
+
+template <bool Mt = false>
+void BuildLaunch(const CuArgs::Arguments& args, const BuildParam& param)
+{
+	if (args.Value(NoCheckArg))
+	{
+		ImageDatabase::Database<ImageDatabase::VectorContainer> db{};
+		const auto& databasePath = param.DbPath;
+		CuAssert(!exists(databasePath));
+		BuildCore<Mt>(db, param);
+	}
+	else
+	{
+		ImageDatabase::Database db{};
+		if (exists(param.DbPath))
+			db.Load(param.DbPath);
+		LogInfo("database size: {}", db.Images.Data.size());
+		BuildCore<Mt>(db, param);
+	}
 }
 
 void BuildOperator(const CuArgs::Arguments& args)
@@ -444,14 +493,15 @@ void BuildOperator(const CuArgs::Arguments& args)
 					 args.Value(DecoderSpecArg),
 					 args.Value(ThreadLimitArg),
 					 args.Value(ZipExtArg),
-					 args.Value(SyncModeArg)};
+					 args.Value(SyncModeArg),
+					 args.Value(DisableDecoderArgument)};
 	if (param.ThreadNum == 1)
 	{
-		BuildCore<false>(param);
+		BuildLaunch<false>(args, param);
 	}
 	else
 	{
-		BuildCore<true>(param);
+		BuildLaunch<true>(args, param);
 	}
 }
 #pragma endregion Build
@@ -821,18 +871,12 @@ void ExportAsCSV(ImageDatabase::Database<Cont>& db, const ExportParams& rawParam
 #ifdef ID_HAS_SQLITE3
 namespace LiteApi
 {
-	class Exception : std::exception
-	{
-	public:
-		using std::exception::exception;
-	};
+	CuExcept_MakeException(SQLiteException, CuExcept, U8Exception);
 
-#define LogLiteErr(api, rc) LogErr("[" #api "] {}", std::u8string_view(reinterpret_cast<const char8_t*>(sqlite3_errstr(rc))))
-#define LiteException(api, rc) ID_MakeApiExcept(#api, "error {}", rc)
+#define LiteException(api, rc) SQLiteException(CuStr::FormatU8("[" #api "] error {}: {}", rc, std::u8string_view(reinterpret_cast<const char8_t*>(sqlite3_errstr(rc)))))
 #define ThrowIfLiteException(api, rc, ifExpr)\
 	if (ifExpr)\
 	{\
-		LogLiteErr(api, rc);\
 		throw LiteException(api, rc);\
 	}
 
@@ -850,7 +894,7 @@ namespace LiteApi
 		Statement& operator=(const Statement&) = delete;
 		Statement& operator=(Statement&&) = default;
 
-		Statement(std::shared_ptr<sqlite3> rawDb, const std::u8string_view& sql) : db(rawDb)
+		Statement(std::shared_ptr<sqlite3> rawDb, const std::u8string_view& sql) : db(std::move(rawDb))
 		{
 			sqlite3_stmt* stmtPtr;
 			const char* tail = nullptr;
@@ -859,7 +903,6 @@ namespace LiteApi
 			{
 				if (tail)
 					LogErr("found error:> {}", sql.substr(reinterpret_cast<const char8_t*>(tail) - sql.data()));
-				LogLiteErr(sqlite3_prepare_v2, rc);
 				throw LiteException(sqlite3_prepare_v2, rc);
 			}
 			stmt = std::shared_ptr<sqlite3_stmt>(stmtPtr, [parent=db](sqlite3_stmt* ptr)
@@ -945,14 +988,13 @@ namespace LiteApi
 
 		void Exec(const std::u8string_view& sql, int (*callback)(void*, int, char**, char**) = nullptr, void* param = nullptr) const
 		{
-			CuUtil_Assert(sql[sql.size()] == 0, ImageDatabase::Exception);
+			CuAssert(sql[sql.size()] == 0);
 			char* err = nullptr;
 			if (const auto rc = sqlite3_exec(db.get(), reinterpret_cast<const char*>(sql.data()), callback, param, &err); rc != SQLITE_OK)
 			{
 				LogErr("[sqlite3_exec] {}", std::u8string_view(reinterpret_cast<char8_t*>(err)));
 				sqlite3_free(err);
 				err = nullptr;
-				LogLiteErr(sqlite3_exec, rc);
 				throw LiteException(sqlite3_exec, rc);
 			}
 		}
@@ -1129,7 +1171,7 @@ struct QueryParams
 {
 	std::vector<std::filesystem::path> Input{};
 	float Threshold{};
-	ImageDatabase::Device Vgg16Device;
+	ImageDatabase::Device Vgg16Device{};
 	std::unordered_set<std::u8string> ExtBlackList{};
 	std::unordered_map<std::u8string, ImageDatabase::Decoder> ExtDecoderList{};
 	std::unordered_set<std::u8string> ZipList{};
@@ -1370,7 +1412,7 @@ int main(const int argc, const char *argv[])
 	args.Add(OperatorArg, DatabaseArg, PathArg, ThresholdArg, ThreadLimitArg, DeviceArg, IgnoreExtArg, ZipExtArg,
 	         DecoderSpecArg, LogLevelArg, LogFileArg, ReplaceRegexArg, ReplaceRegexFlagArg, ReplaceValueArg,
 	         ExportTypeArg, LazyArg, OutputArg, OutputDatabaseNameArg, OutputTableNameArg, OutputColumnsArg,
-	         DatabaseUserArg, DatabasePasswordArg, SyncModeArg);
+	         DatabaseUserArg, DatabasePasswordArg, SyncModeArg, NoCheckArg, DisableDecoderArgument);
 
 	const auto usage = [&]
 	{ return CuStr::Format("Usage:\n{}\n{}", argv[0], args.GetDesc()); };
@@ -1381,8 +1423,10 @@ int main(const int argc, const char *argv[])
 	}
 	catch (const std::exception &ex)
 	{
+		CuConsole::SetForegroundColor(CuConsole::Color::Red);
 		CuConsole::Error::WriteLine(ex.what());
 		CuConsole::Error::WriteLine(usage());
+		exit(EXIT_FAILURE);
 	}
 #pragma endregion ArgsParse
 
@@ -1425,6 +1469,16 @@ int main(const int argc, const char *argv[])
 			{Operator::Export, ExportOperator},
 			{Operator::Query, QueryOperator}
 		}[args.Value(OperatorArg)](args);
+	}
+	catch (const CuExcept::Exception& ex)
+	{
+		LogErr("{}", ex.ToString());
+		LogInfo(usage());
+	}
+	catch (const CuExcept::U8Exception& ex)
+	{
+		LogErr("{}", ex.ToString());
+		LogInfo(usage());
 	}
 	catch (const std::exception &ex)
 	{
