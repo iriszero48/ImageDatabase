@@ -8,7 +8,6 @@
 #include <unordered_set>
 #include <execution>
 #include <bit>
-#include <format>
 
 #include <eigen3/Eigen/Eigen>
 #include <opencv2/core.hpp>
