@@ -740,8 +740,11 @@ namespace ImageDatabase
 			{
 				auto img = CuImg::ConvertToImageBGR_OpenCV(raw);
 
+#if LIBAVCODEC_VERSION_MAJOR >= 60
+				const auto idx = decoder.GetVideoCodecContext()->frame_num - 1;
+#else
 				const auto idx = decoder.GetVideoCodecContext()->frame_number - 1;
-
+#endif
 				const auto pu8 = idx < 1 ? filePath : filePath / *CuConv::ToString(idx);
 				set(extractor.Path(pu8), extractor.Md5(img), extractor.Vgg16(img.Raw()));
 				++passed;

@@ -22,6 +22,7 @@ find_package(Boost REQUIRED)
 find_package(unofficial-graphicsmagick CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(range-v3 CONFIG REQUIRED)
+find_package(directxtex CONFIG REQUIRED)
 
 set(ID_LIBS
     Eigen3::Eigen
@@ -31,6 +32,7 @@ set(ID_LIBS
     unofficial::graphicsmagick::graphicsmagick
     nlohmann_json nlohmann_json::nlohmann_json
     range-v3::range-v3
+    Microsoft::DirectXTex
 )
 
 set(ID_DEFS
@@ -39,15 +41,10 @@ set(ID_DEFS
 
     CU_IMG_HAS_OPENCV
     CU_IMG_HAS_GRAPHICSMAGICK
+    CU_IMG_HAS_DIRECTXTEX
 
     CU_EXCEPTION_USE_BOOST_STACKTRACE
 )
-
-if (WIN32)
-    find_package(directxtex CONFIG REQUIRED)
-    list(APPEND ID_DEFS CU_IMG_HAS_DIRECTXTEX)
-    list(APPEND ID_LIBS Microsoft::DirectXTex)
-endif()
 
 if (UNIX)
     find_package(TBB CONFIG REQUIRED)

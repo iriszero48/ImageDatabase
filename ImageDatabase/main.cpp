@@ -29,9 +29,13 @@
 #include <range/v3/view.hpp>
 #include <boost/config.hpp>
 
+#ifdef ID_HAS_SQLITE3
 #include <sqlite3.h>
+#endif
 
+#ifdef ID_HAS_LIBPQXX
 #include <pqxx/pqxx>
+#endif
 
 #ifndef _MSC_VER
 #include <unistd.h>
@@ -1454,7 +1458,7 @@ int main(const int argc, const char *argv[])
 	sigemptyset(&sigIntHandler.sa_mask);
 	sigIntHandler.sa_flags = 0;
 
-	sigaction(SIGINT, &sigIntHandler, NULL);
+	sigaction(SIGINT, &sigIntHandler, nullptr);
 #endif
 
 	try
