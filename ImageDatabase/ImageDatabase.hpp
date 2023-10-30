@@ -256,8 +256,11 @@ namespace ImageDatabase
 		}
 	};
 
-#define ID_MakeImageUnpackConstParams(p, m, v) const PathType& p, const Md5Type& m, const Vgg16Type& v
-#define ID_MakeImageUnpackMoveParams(p, m, v) PathType&& p, Md5Type&& m, Vgg16Type&& v
+#define ID_MakeImageUnpackConstParams(p, m, v)\
+	const ImageDatabase::PathType& p, const ImageDatabase::Md5Type& m, const ImageDatabase::Vgg16Type& v
+#define ID_MakeImageUnpackMoveParams(p, m, v)\
+	ImageDatabase::PathType&& p, ImageDatabase::Md5Type&& m, ImageDatabase::Vgg16Type&& v
+#define ID_MakeImageUnpackForward(p,m,v) std::move(p), std::move(m), std::move(v)
 	template <typename T>
 	struct IContainer
 	{
@@ -966,7 +969,12 @@ namespace ImageDatabase
 			fs.write(reinterpret_cast<const char*>(v.data()), sizeof(float) * 512);
 		}
 
-		static std::ofstream CreateDatabaseFile(const std::filesystem::path& path)
+		std::ofstream CreateDatabaseFileWriter() const
+		{
+			return CreateDatabaseFileWriter(databasePath);
+		}
+
+		static std::ofstream CreateDatabaseFileWriter(const std::filesystem::path& path)
 		{
 			std::ofstream fs(path, std::ios::out | std::ios::binary);
 			if (!fs) throw std::runtime_error("load file: bad stream");
@@ -994,7 +1002,7 @@ namespace ImageDatabase
 		
 		void Save(const std::filesystem::path& savePath)
 		{
-			auto fs = CreateDatabaseFile(savePath);
+			auto fs = CreateDatabaseFileWriter(savePath);
 			Save(fs);
 		}
 

@@ -310,13 +310,6 @@ CuArgs::BoolArgument SyncModeArg
 	"sync write"
 };
 
-CuArgs::BoolArgument NoCheckArg
-{
-	"--no-check",
-	"no check",
-	false
-};
-
 CuArgs::Argument<std::underlying_type_t<ImageDatabase::Decoder>> DisableDecoderArgument
 {
 	"--disable-decoders",
@@ -378,7 +371,6 @@ struct BuildParam
 	std::unordered_map<std::u8string, ImageDatabase::Decoder> ExtDecoderList;
 	size_t ThreadNum;
 	std::unordered_set<std::u8string> ZipList;
-	bool SyncMode;
 	std::underlying_type_t<ImageDatabase::Decoder> DisableDecoder;
 };
 
@@ -396,15 +388,45 @@ std::filesystem::path BuildGetPath(const ImageDatabase::Reader::LoadType& t)
 	                  }, t);
 }
 
-template <bool Mt = false, typename Cont>
-void BuildCore(ImageDatabase::Database<Cont>& db, const BuildParam &param)
+template <bool Sync>
+struct BuildCallback
 {
+private:
+	ImageDatabase::Database<>* db;
+
+public:
+	std::shared_ptr<std::ofstream> FileStream;
+
+	BuildCallback(ImageDatabase::Database<>& db) : db(&db) {}
+
+	void operator()(ID_MakeImageUnpackMoveParams(p,m,v)) const
+	{
+		if constexpr (Sync)
+		{
+			db->SaveImage(*FileStream, p, m, v);
+			LogVerb("wrote {} bytes", FileStream->tellp());
+		}
+		else
+		{
+			db->Append(ID_MakeImageUnpackForward(p, m, v));
+		}
+	}
+};
+
+template <bool Mt = false, bool Sync = false>
+void BuildCore(ImageDatabase::Database<>& db, const BuildParam &param)
+{
+	BuildCallback<Sync> cb(db);
+	if constexpr (Sync)
+	{
+		cb.FileStream = std::make_shared<std::ofstream>(db.CreateDatabaseFileWriter());
+	}
+
 	if constexpr (Mt)
 	{
 		CuThread::Channel<std::optional<ImageDatabase::Reader::LoadType>, CuThread::Dynamics> mq{};
 		mq.DynLimit = param.ThreadNum;
-		CuThread::Synchronize push([&](ImageDatabase::PathType && p, ImageDatabase::Md5Type && m, ImageDatabase::Vgg16Type && v)
-								   { db.Append(std::move(p), std::move(m), std::move(v)); });
+		CuThread::Synchronize push(cb);
 
 		ImageDatabase::Reader reader([&](ImageDatabase::Reader& self, ImageDatabase::Reader::LoadType &&data)
 									 { mq.Write(std::move(data)); },
@@ -448,10 +470,7 @@ void BuildCore(ImageDatabase::Database<Cont>& db, const BuildParam &param)
 		ImageDatabase::Reader reader([&](ImageDatabase::Reader& self, ImageDatabase::Reader::LoadType&& data)
 		                             {
 			                             LogInfo("scan: {}", BuildGetPath(data));
-			                             self.Process([&](ImageDatabase::PathType&& p, ImageDatabase::Md5Type&& m, ImageDatabase::Vgg16Type&& v)
-			                             {
-				                             db.Append(std::move(p), std::move(m), std::move(v));
-			                             }, extractor, data);
+			                             self.Process(cb, extractor, data);
 		                             },
 		                             param.BuildPath);
 		reader.ExtBlackList = param.ExtBlackList;
@@ -462,28 +481,31 @@ void BuildCore(ImageDatabase::Database<Cont>& db, const BuildParam &param)
 		reader.Read();
 	}
 
-	LogInfo("save database : {}", param.DbPath);
-	db.Save(param.DbPath);
+	if constexpr (!Sync)
+	{
+		LogInfo("save database : {}", param.DbPath);
+		db.Save(param.DbPath);
+	}
 	LogInfo("database size: {}", db.Size());
 }
 
 template <bool Mt = false>
 void BuildLaunch(const CuArgs::Arguments& args, const BuildParam& param)
 {
-	if (args.Value(NoCheckArg))
+	const auto sync = args.Value(SyncModeArg);
+
+	ImageDatabase::Database db(param.DbPath);
+	LogInfo("database size: {}", db.Size());
+
+	if (sync && db.Size() > 0) throw ID_MakeExcept("sync && db.Size() > 0");
+
+	if (sync)
 	{
-		ImageDatabase::Database<ImageDatabase::VectorContainer> db{};
-		const auto& databasePath = param.DbPath;
-		CuAssert(!exists(databasePath));
-		BuildCore<Mt>(db, param);
+		BuildCore<Mt, true>(db, param);
 	}
 	else
 	{
-		ImageDatabase::Database db{};
-		if (exists(param.DbPath))
-			db.Load(param.DbPath);
-		LogInfo("database size: {}", db.Images.Data.size());
-		BuildCore<Mt>(db, param);
+		BuildCore<Mt, false>(db, param);
 	}
 }
 
@@ -497,7 +519,6 @@ void BuildOperator(const CuArgs::Arguments& args)
 					 args.Value(DecoderSpecArg),
 					 args.Value(ThreadLimitArg),
 					 args.Value(ZipExtArg),
-					 args.Value(SyncModeArg),
 					 args.Value(DisableDecoderArgument)};
 	if (param.ThreadNum == 1)
 	{
@@ -510,58 +531,107 @@ void BuildOperator(const CuArgs::Arguments& args)
 }
 #pragma endregion Build
 
-template <typename Cont>
-void ConcatDatabase(ImageDatabase::Database<>& out, ImageDatabase::Database<Cont>& db)
+template <bool Sync>
+struct ConcatForEach
 {
-	db.ForEach([&](const ImageDatabase::PathType& p, const ImageDatabase::Md5Type& m, const ImageDatabase::Vgg16Type& v)
+	std::ofstream FileStream{};
+
+	template <typename Cont>
+	void operator()(ImageDatabase::Database<>& out, ImageDatabase::Database<Cont>& db)
 	{
-		if (const auto pos = out.Images.Data.find(p); pos != out.Images.Data.end())
-		{
-			const auto& [om, ov] = pos->second;
-			LogWarn("dup path: {}. replace {} => {}, {}, ... => {}, ...",
-			        ImageDatabase::ImageInfo::PathU8String(pos->first),
-			        ImageDatabase::ImageInfo::Md5String(om), ImageDatabase::ImageInfo::Md5String(m),
-			        ov[0], v[0]);
-			pos->second = std::make_tuple(m, v);
-		}
-		else
-		{
-			out.Images.Data[p] = std::make_tuple(m, v);
-		}
-	});
-}
+		db.ForEach([&](const ImageDatabase::PathType& p, const ImageDatabase::Md5Type& m, const ImageDatabase::Vgg16Type& v)
+			{
+				if constexpr (Sync)
+				{
+					db.SaveImage(FileStream, p, m, v);
+					LogVerb("wrote {} bytes", FileStream.tellp());
+				}
+				else
+				{
+					if (const auto pos = out.Images.Data.find(p); pos != out.Images.Data.end())
+					{
+						const auto& [om, ov] = pos->second;
+						LogWarn("dup path: {}. replace {} => {}, {}, ... => {}, ...",
+							ImageDatabase::ImageInfo::PathU8String(pos->first),
+							ImageDatabase::ImageInfo::Md5String(om), ImageDatabase::ImageInfo::Md5String(m),
+							ov[0], v[0]);
+						pos->second = std::make_tuple(m, v);
+					}
+					else
+					{
+						out.Images.Data[p] = std::make_tuple(m, v);
+					}
+				}
+			});
+	}
+};
 
-void ConcatOperator(const CuArgs::Arguments& args)
+struct ConcatParams
 {
-	const auto outDbPath = args.Value(DatabaseArg);
-	const auto concatDbPaths = args.Value(PathArg);
-	const auto lazy = args.Value(LazyArg);
+	std::filesystem::path OutputDatabasePath;
+	std::vector<std::filesystem::path> ConcatDatabasePaths;
+	bool LazyLoad;
+};
 
+template <bool Sync>
+void ConcatDatabase(const ConcatParams& params)
+{
 	ImageDatabase::Database outDb{};
-	if (std::filesystem::exists(outDbPath))
+	if (exists(params.OutputDatabasePath))
 	{
-		outDb.Load(outDbPath);
-		LogInfo("load database: {}: {}", outDbPath, outDb.Images.Data.size());
+		outDb.Load(params.OutputDatabasePath);
+		LogInfo("load database: {}: {}", params.OutputDatabasePath, outDb.Size());
 	}
 
-	for (const auto& concatDbPath : concatDbPaths)
+	if (Sync && outDb.Size() > 0)
 	{
-		if (lazy)
+		CuAssert(false);
+	}
+
+	ConcatForEach<Sync> fe{};
+	if constexpr (Sync)
+	{
+		fe.FileStream = outDb.CreateDatabaseFileWriter(params.OutputDatabasePath);
+	}
+
+	for (const auto& concatDbPath : params.ConcatDatabasePaths)
+	{
+		if (params.LazyLoad)
 		{
 			ImageDatabase::Database<ImageDatabase::LazyContainer> concatDb(concatDbPath);
 			LogInfo("load database: {}: {}", concatDbPath, concatDb.Size());
-			ConcatDatabase(outDb, concatDb);
+			fe(outDb, concatDb);
 		}
 		else
 		{
 			ImageDatabase::Database<ImageDatabase::VectorContainer> concatDb(concatDbPath);
 			LogInfo("load database: {}: {}", concatDbPath, concatDb.Size());
-			ConcatDatabase(outDb, concatDb);
+			fe(outDb, concatDb);
 		}
 	}
 
-	outDb.Save(outDbPath);
-	LogInfo("save database: {}: {}", outDbPath, outDb.Size());
+	if constexpr (!Sync)
+	{
+		outDb.Save(params.OutputDatabasePath);
+	}
+	LogInfo("save database: {}: {}", params.OutputDatabasePath, outDb.Size());
+}
+
+void ConcatOperator(const CuArgs::Arguments& args)
+{
+	const ConcatParams params{
+		args.Value(DatabaseArg),
+		args.Value(PathArg),
+		args.Value(LazyArg)
+	};
+	if (args.Value(SyncModeArg))
+	{
+		ConcatDatabase<true>(params);
+	}
+	else
+	{
+		ConcatDatabase<false>(params);
+	}
 }
 
 struct ReplaceParams
@@ -606,7 +676,7 @@ void ReplaceCore(const ReplaceParams& params, ImageDatabase::Database<Cont>& db)
 {
 	LogInfo("database size: {}", db.Size());
 
-	auto fs = ImageDatabase::Database<>::CreateDatabaseFile(params.OutPath);
+	auto fs = ImageDatabase::Database<>::CreateDatabaseFileWriter(params.OutPath);
 	if (std::is_same_v<Cont, ImageDatabase::LazyContainer>)
 	{
 		db.ForEach([&](const ImageDatabase::PathType& p, const ImageDatabase::Md5Type& m, const ImageDatabase::Vgg16Type& v)
@@ -836,9 +906,10 @@ void ExportAsPostgreSQL(ImageDatabase::Database<Cont>& db, const ExportParams& r
 	const auto host = CuStr::Split(params.Output, ':');
 	if (host.size() != 2) throw ID_MakeExcept(R"(require "-o hostaddr:port")");
 
-	auto pqConn = PqApi::Connection(
-		CuStr::Format("hostaddr={} port={} dbname={} user={} password={}",
-			host[0], host[1], params.Database, params.User, params.Password));
+	const auto url = CuStr::Format("hostaddr={} port={} dbname={} user={} password={}",
+		host[0], host[1], params.Database, params.User, params.Password);
+	LogVerb("exec -> {}", url);
+	auto pqConn = PqApi::Connection(url);
 
 	const auto trans = PqApi::Work(pqConn);
 	auto st = PqApi::RawTable(*trans, params.Table, params.Columns);
@@ -1131,10 +1202,12 @@ ExportParams GetExportParams(const ExportType exportType, const CuArgs::Argument
 		}
 	case ExportType::PostgreSQL:
 		{
-			ExportPostgreSQLParams params{
-				args.Value(OutputDatabaseNameArg), args.Value(OutputTableNameArg), args.Value(OutputColumnsArg),
-				args.Value(DatabaseUserArg), args.Value(DatabasePasswordArg)
-			};
+			ExportPostgreSQLParams params;
+			params.Database = args.Value(OutputDatabaseNameArg);
+			params.Table = args.Value(OutputTableNameArg);
+			params.Columns = args.Value(OutputColumnsArg);
+			params.User = args.Value(DatabaseUserArg);
+			params.Password = args.Value(DatabasePasswordArg);
 			params.Output = args.Value(OutputArg);
 			return params;
 		}
@@ -1416,7 +1489,7 @@ int main(const int argc, const char *argv[])
 	args.Add(OperatorArg, DatabaseArg, PathArg, ThresholdArg, ThreadLimitArg, DeviceArg, IgnoreExtArg, ZipExtArg,
 	         DecoderSpecArg, LogLevelArg, LogFileArg, ReplaceRegexArg, ReplaceRegexFlagArg, ReplaceValueArg,
 	         ExportTypeArg, LazyArg, OutputArg, OutputDatabaseNameArg, OutputTableNameArg, OutputColumnsArg,
-	         DatabaseUserArg, DatabasePasswordArg, SyncModeArg, NoCheckArg, DisableDecoderArgument);
+	         DatabaseUserArg, DatabasePasswordArg, SyncModeArg, DisableDecoderArgument);
 
 	const auto usage = [&]
 	{ return CuStr::Format("Usage:\n{}\n{}", argv[0], args.GetDesc()); };
