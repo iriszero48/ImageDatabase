@@ -3,13 +3,14 @@
 
 ## 依赖
 + eigen3
-+ opencv4[dnn,eigen,jpeg,png,quirc,tiff,webp]
-+ ffmpeg[avcodec,avformat,swscale]
-+ libzip
-+ boost-context
-+ (Linux/Mac) tbb
++ opencv[contrib,dnn-cuda,tbb,nonfree]
++ ffmpeg[aom,avcodec,avformat,bzip2,dav1d,gpl,iconv,ilbc,lzma,modplug,nonfree,opencl,openjpeg,openmpt,openssl,speex,ssh,swscale,version3,vpx,xml2,zlib]
++ libzip[*]
++ boost-stacktrace
++ graphicsmagick
++ nlohmann-json
++ directxtex
 
 ## 构建
-+ CMake/VisualStudio
-+ G++/Clang++/MSVC (要求支持C++17)
++ CMake
 + MMdnn

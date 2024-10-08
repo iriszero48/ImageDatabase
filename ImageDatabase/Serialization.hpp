@@ -115,6 +115,13 @@ namespace Serialization
         {
             (WriteImpl<false>(args),...);
         }
+
+        template <typename T, size_t S>
+        void WriteArray(const std::span<T, S>& arr)
+        {
+            if constexpr (S == std::dynamic_extent) Write<uint64_t>(S);
+            for (const auto& v : arr) Write(v);
+        }
     private:
         std::ostream& fs;
 
@@ -145,7 +152,7 @@ namespace Serialization
                 __Detail::WriteArithmetic(fs, val);
 			}
 			else if constexpr ((std::is_base_of_v<std::basic_string<typename T::value_type>, T>
-					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>))
+					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>) && sizeof(typename T::value_type) == 1)
 			{
                 try
                 {
@@ -154,12 +161,12 @@ namespace Serialization
                     if constexpr (ToStr)
                     {
                         __Detail::WriteArithmeticStr(fs, len);
-                        fs.write(val.data(), len);
+                        fs.write((const char*)val.data(), len);
                         return;
                     }
 
                     __Detail::WriteArithmetic(fs, len);
-                    fs.write(val.data(), len);
+                    fs.write((const char*)val.data(), len);
                 }
                 catch(Eof)
                 {
@@ -203,13 +210,24 @@ namespace Serialization
         template<typename... Args>
         decltype(auto) ReadFromString()
         {
-            return std::make_tuple((ReadImpl<Args, true>(),...));
+            return std::make_tuple((ReadImpl<Args, true>(), ...));
         }
 
-        template<typename... Args>
+        template<typename T>
         decltype(auto) Read()
         {
-            return std::make_tuple((ReadImpl<Args, false>(),...));
+            return ReadImpl<T, false>();
+        }
+
+        template<typename T, size_t S>
+        decltype(auto) ReadArray()
+        {
+            std::array<T, S> ret;
+            for (auto & v : ret)
+            {
+                v = Read<T>();
+            }
+            return ret;
         }
     private:
         std::istream& fs;
@@ -239,7 +257,7 @@ namespace Serialization
                 return __Detail::ReadArithmetic<T>(fs);
 			}
 			else if constexpr ((std::is_base_of_v<std::basic_string<typename T::value_type>, T>
-					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>))
+					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>) && sizeof(T::value_type) == 1)
 			{
                 uint64_t len;
                 if constexpr (FromStr)
@@ -250,11 +268,11 @@ namespace Serialization
                 {
                     len = __Detail::ReadArithmetic<uint64_t>(fs);
                 }
-                std::string buf(len, 0);
-                fs.read(&buf[0], len);
+                std::basic_string<typename T::value_type> buf(len, 0);
+                fs.read((char*)buf.data(), len);
                 return buf;
 			}
-            else if constexpr (std::is_same_v<T, std::vector<char>> || std::is_same_v<T, std::vector<char8_t>>)
+            else if constexpr (std::is_same_v<T, std::vector<char>> || std::is_same_v<T, std::vector<char8_t>> || std::is_same_v<T, std::vector<uint8_t>>)
             {
                 uint64_t len;
                 if constexpr (FromStr)
