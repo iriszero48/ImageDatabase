@@ -12,7 +12,7 @@
 
 #include <Image/File.hpp>
 
-#define Id_Yields(expr) for (auto& _value : (expr)) co_yield _value;
+#define Id_Yields(expr) for (auto* _value : (expr)) co_yield _value;
 
 namespace ImageDatabase
 {
@@ -172,7 +172,7 @@ namespace ImageDatabase
 
 			GeneratorType operator()(const std::filesystem::path& path, const std::span<const uint8_t>& data) const
 			{
-#ifdef _MSC_VER
+#ifdef CU_IMG_HAS_DIRECTXTEX
 				std::filesystem::path dxPath;
 				bool useTmp = false;
 				if (path.empty())
@@ -196,7 +196,7 @@ namespace ImageDatabase
 				}
 				if (useTmp) std::filesystem::remove(dxPath);
 #else
-				throw ID_MakeExcept("{}", "not impl");
+				throw Id_MakeExcept("{}", "not impl");
 #endif
 			}
 
@@ -431,7 +431,7 @@ namespace ImageDatabase
 		{
 			for (const auto& path : root)
 			{
-				for (auto& value : ScanPath(path))
+				for (auto* value : ScanPath(path))
 				{
 					LogInfo("-> {}", value->Path);
 					co_yield value;

@@ -49,6 +49,8 @@ namespace ImageDatabase
 		template <WriteMode Mode, bool UseBuffer, typename Dataset, typename Stream>
 		static void BuildImplProc(Dataset& dataset, Stream& fs, Extractor& extractor, const RawData& raw)
 		{
+			LogInfo("build \"{}\"", raw.Path);
+
 			static std::mutex fsMtx{};
 
 			auto data = dataset.MakeData(extractor(raw));
@@ -94,7 +96,7 @@ namespace ImageDatabase
 			{
 				auto extractor = createExtractor();
 
-				for (auto& rawData : generator.Scan(params.Input))
+				for (auto* rawData : generator.Scan(params.Input))
 				{
 					BuildImplProc<WriteMode::Sync, UseBuffer>(dataset, fs, *extractor, *rawData);
 				}
