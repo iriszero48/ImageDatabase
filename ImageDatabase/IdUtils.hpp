@@ -2,6 +2,7 @@
 #include <regex>
 #include <zip.h>
 #include <Convert/Convert.hpp>
+#include <memory>
 
 namespace ImageDatabase
 {
@@ -64,7 +65,7 @@ namespace ImageDatabase
 		[[nodiscard]] static Pointer CopyFrom(const T* p, const size_t s)
 		{
 			Pointer ret(s);
-			memcpy(ret.Native, p, s);
+			std::copy_n(p, s, ret.Native);
 			return ret;
 		}
 
@@ -125,7 +126,7 @@ namespace ImageDatabase
 			ret.Native = Pointer<T>(str.length() + 1);
 			ret.Native.Native[str.length()] = 0;
 			ret.Native.Size = str.length();
-			memcpy(ret.Native.Native, str.data(), str.length());
+			std::copy(str.begin(), str.end(), ret.Native.Native);
 			return ret;
 		}
 

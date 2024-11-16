@@ -14,23 +14,60 @@ file(GLOB_RECURSE CU_FILES "${CU_ROOT}/*.h" "${CU_ROOT}/*.hpp")
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(OpenCV CONFIG REQUIRED)
 find_package(libzip CONFIG REQUIRED)
-find_package(FFMPEG REQUIRED)
-find_package(Boost REQUIRED system)
-find_package(unofficial-graphicsmagick CONFIG REQUIRED)
+find_package(Boost CONFIG REQUIRED system)
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(directxtex CONFIG REQUIRED)
-find_package(Tesseract CONFIG REQUIRED)
 find_package(ZXing CONFIG REQUIRED)
+
+find_package(PkgConfig REQUIRED)
+
+find_package(FFMPEG)
+if (FFMPEG_FOUND)
+    set(ID_FFMPEG_LIBS ${FFMPEG_LIBRARIES})
+else ()
+    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+            libavdevice
+            libavfilter
+            libavformat
+            libavcodec
+            libswresample
+            libswscale
+            libavutil
+    )
+    set(ID_FFMPEG_LIBS PkgConfig::FFMPEG)
+endif ()
+
+find_package(unofficial-graphicsmagick CONFIG)
+if (UNOFFICIAL_GRAPHICSMAGICK_FOUND)
+    set(ID_GRAPHICSMAGICK_LIBS unofficial::graphicsmagick::graphicsmagick)
+else ()
+    pkg_check_modules(GraphicsMagick++ REQUIRED IMPORTED_TARGET GraphicsMagick++)
+    set(ID_GRAPHICSMAGICK_LIBS PkgConfig::GraphicsMagick++)
+endif ()
+
+find_package(Tesseract CONFIG)
+if (TESSETACT_FOUND)
+    set(ID_TESSETACT_LIBS Tesseract::libtesseract)
+else ()
+    pkg_check_modules(Tesseract REQUIRED IMPORTED_TARGET tesseract)
+    set(ID_TESSETACT_LIBS PkgConfig::Tesseract)
+endif ()
+
+find_package(directxtex CONFIG)
+if (DIRECTXTEX_FOUND)
+    set(ID_DXTEX_LIBS Microsoft::DirectXTex)
+else ()
+    set(ID_DXTEX_LIBS)
+endif ()
 
 set(ID_LIBS
     Eigen3::Eigen
-    opencv_core opencv_imgcodecs opencv_dnn opencv_highgui opencv_features2d opencv_cudafeatures2d
+    opencv_core opencv_imgcodecs opencv_dnn opencv_highgui opencv_features2d
     libzip::zip
-    ${FFMPEG_LIBRARIES}
-    unofficial::graphicsmagick::graphicsmagick
+    ${ID_FFMPEG_LIBS}
+    ${ID_GRAPHICSMAGICK_LIBS}
     nlohmann_json nlohmann_json::nlohmann_json
-    Microsoft::DirectXTex
-    Tesseract::libtesseract
+    ${ID_DXTEX_LIBS}
+    ${ID_TESSETACT_LIBS}
     ZXing::ZXing
 )
 
@@ -40,10 +77,13 @@ set(ID_DEFS
 
     CU_IMG_HAS_OPENCV
     CU_IMG_HAS_GRAPHICSMAGICK
-    CU_IMG_HAS_DIRECTXTEX
 
     CU_EXCEPTION_USE_BOOST_STACKTRACE
 )
+
+if (DIRECTXTEX_FOUND)
+    list(APPEND ID_DEFS CU_IMG_HAS_DIRECTXTEX)
+endif()
 
 if (UNIX)
     find_package(TBB CONFIG REQUIRED)

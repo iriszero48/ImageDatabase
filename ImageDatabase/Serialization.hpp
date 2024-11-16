@@ -257,7 +257,7 @@ namespace Serialization
                 return __Detail::ReadArithmetic<T>(fs);
 			}
 			else if constexpr ((std::is_base_of_v<std::basic_string<typename T::value_type>, T>
-					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>) && sizeof(T::value_type) == 1)
+					|| std::is_base_of_v<std::basic_string_view<typename T::value_type>, T>) && sizeof(typename T::value_type) == 1)
 			{
                 uint64_t len;
                 if constexpr (FromStr)
