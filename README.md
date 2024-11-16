@@ -6,7 +6,6 @@
 + opencv[contrib,dnn-cuda,tbb,nonfree]
 + ffmpeg[aom,avcodec,avformat,bzip2,dav1d,gpl,iconv,ilbc,lzma,modplug,nonfree,opencl,openjpeg,openmpt,openssl,speex,ssh,swscale,version3,vpx,xml2,zlib]
 + libzip[*]
-+ boost-stacktrace
 + graphicsmagick
 + nlohmann-json
 + directxtex
