@@ -3,6 +3,9 @@
 #include "IdDatabase.hpp"
 
 #include <boost/config.hpp>
+#include <boost/version.hpp>
+#include <ZXing/ZXVersion.h>
+#include <DirectXTex.h>
 
 int main(const int argc, const char* argv[])
 {
@@ -10,6 +13,14 @@ int main(const int argc, const char* argv[])
 	CuConsole::WriteLine("  built with " BOOST_PLATFORM "/" BOOST_COMPILER);
 	CuConsole::WriteLine("+ tesseract/", tesseract::TessBaseAPI::Version());
 	CuConsole::WriteLine("+ ffmpeg/", LIBAVCODEC_IDENT);
+	CuConsole::WriteLine("+ opencv/", CV_VERSION);
+	CuConsole::WriteLine("+ eigen/", EIGEN_WORLD_VERSION, ".", EIGEN_MAJOR_VERSION, ".", EIGEN_MINOR_VERSION);
+	CuConsole::WriteLine("+ libzip/", zip_libzip_version());
+	CuConsole::WriteLine("+ boost/", BOOST_LIB_VERSION);
+	CuConsole::WriteLine("+ nlohmann-json/", NLOHMANN_JSON_VERSION_MAJOR, ".", NLOHMANN_JSON_VERSION_MINOR, ".", NLOHMANN_JSON_VERSION_PATCH);
+	CuConsole::WriteLine("+ ZXing/", ZXing::ZXING_VERSION_STR);
+	CuConsole::WriteLine("+ GraphicsMagick/", MagickLibVersionText);
+	CuConsole::WriteLine("+ DirectXTex/", DIRECTX_TEX_VERSION);
 
 	namespace Id = ImageDatabase;
 
@@ -40,7 +51,7 @@ int main(const int argc, const char* argv[])
 		});
 	CuArgs::Argument<ImageDatabase::Regex> ignoresArg("--ignore", "ignore", [](const auto& x) { return Id::Regex(x); }, [](const auto& x) { return x.RawString; });
 	CuArgs::Argument decoderArg("--decoder", "decoder " + CuStr::Views::Join(CuEnum::Strings<Id::Decoder>(), "|"), 0x0111);
-	CuArgs::EnumArgument deviceArg("--device", "device", ImageDatabase::Device::cuda);
+	CuArgs::EnumArgument deviceArg("--device", "device", ImageDatabase::Device::opencl);
 	CuArgs::Argument<uint32_t> threadArg("-t", "thread", 1);
 	CuArgs::Argument<std::vector<std::u8string>> zipExtsArg(
 		"-z",
@@ -95,7 +106,10 @@ int main(const int argc, const char* argv[])
 	CuArgs::BoolArgument useBufferArg("--use-buffer", "use buffer");
 	args.Add(outputArg, typeArg, useBufferArg);
 
+//#define NO_CATCH
+#ifndef NO_CATCH
 	try
+#endif
 	{
 		args.Parse(argc, argv);
 
@@ -126,8 +140,10 @@ int main(const int argc, const char* argv[])
 			break;
 		}
 	}
+#ifndef NO_CATCH
 	catch (const std::exception& exception)
 	{
 		CuConsole::Error::WriteLine(exception.what());
 	}
+#endif
 }

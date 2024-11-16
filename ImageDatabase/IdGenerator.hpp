@@ -242,6 +242,8 @@ namespace ImageDatabase
 				{
 					if (const std::string_view filename(zs.name); filename[filename.length() - 1] != '/')
 					{
+						LogVerb("load zip file: {}/{}", file, filename);
+
 						auto* const zf = zip_fopen_index(za, i, 0);
 						if (zf == nullptr)
 						{
@@ -284,6 +286,7 @@ namespace ImageDatabase
 
 		GeneratorType ScanZip(const std::filesystem::path& file, const std::span<uint8_t>& data)
 		{
+			LogVerb("load zip(d): {}", file);
 			zip_error_t error;
 			zip_source_t* src = zip_source_buffer_create(data.data(), data.size(), 0, &error);
 			if (src == nullptr)
@@ -298,6 +301,7 @@ namespace ImageDatabase
 
 		GeneratorType ScanZip(const std::filesystem::path& file)
 		{
+			LogVerb("load zip: {}", file);
 			zip_t* za;
 			int err;
 			if ((za = zip_open(reinterpret_cast<const char*>(file.u8string().c_str()), 0, &err)) == nullptr) {
@@ -382,6 +386,7 @@ namespace ImageDatabase
 
 		GeneratorType ScanFile(const std::filesystem::path& file)
 		{
+			LogVerb("load file: {}", file);
 			if (is_symlink(file)) co_return;
 
 			const auto pathU8 = file.u8string();
@@ -404,6 +409,7 @@ namespace ImageDatabase
 			}
 			else if (is_directory(path))
 			{
+				LogVerb("load dir: {}", path);
 				for (std::error_code error; auto & entry : std::filesystem::recursive_directory_iterator(path, std::filesystem::directory_options::skip_permission_denied, error))
 				{
 					if (error != std::error_code{})
@@ -431,6 +437,8 @@ namespace ImageDatabase
 		{
 			for (const auto& path : root)
 			{
+				LogVerb("scan: {}", path);
+
 				for (auto* value : ScanPath(path))
 				{
 					LogInfo("-> {}", value->Path);

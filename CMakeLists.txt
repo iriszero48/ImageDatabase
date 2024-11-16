@@ -37,7 +37,7 @@ else ()
 endif ()
 
 find_package(unofficial-graphicsmagick CONFIG)
-if (UNOFFICIAL_GRAPHICSMAGICK_FOUND)
+if (unofficial-graphicsmagick_FOUND)
     set(ID_GRAPHICSMAGICK_LIBS unofficial::graphicsmagick::graphicsmagick)
 else ()
     pkg_check_modules(GraphicsMagick++ REQUIRED IMPORTED_TARGET GraphicsMagick++)
@@ -45,7 +45,7 @@ else ()
 endif ()
 
 find_package(Tesseract CONFIG)
-if (TESSETACT_FOUND)
+if (Tesseract_FOUND)
     set(ID_TESSETACT_LIBS Tesseract::libtesseract)
 else ()
     pkg_check_modules(Tesseract REQUIRED IMPORTED_TARGET tesseract)
@@ -53,7 +53,7 @@ else ()
 endif ()
 
 find_package(directxtex CONFIG)
-if (DIRECTXTEX_FOUND)
+if (directxtex_FOUND)
     set(ID_DXTEX_LIBS Microsoft::DirectXTex)
 else ()
     set(ID_DXTEX_LIBS)
@@ -81,7 +81,7 @@ set(ID_DEFS
     CU_EXCEPTION_USE_BOOST_STACKTRACE
 )
 
-if (DIRECTXTEX_FOUND)
+if (directxtex_FOUND)
     list(APPEND ID_DEFS CU_IMG_HAS_DIRECTXTEX)
 endif()
 

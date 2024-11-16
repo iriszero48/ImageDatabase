@@ -135,4 +135,25 @@ namespace ImageDatabase
 			return { Native.Native, Native.Size };
 		}
 	};
+
+	template <typename T = std::chrono::milliseconds, typename C = std::chrono::high_resolution_clock>
+	class Timer
+	{
+		C::time_point begin{};
+	public:
+		Timer()
+		{
+			Reset();
+		}
+
+		T Elapse()
+		{
+			return std::chrono::duration_cast<T>(C::now() - begin);
+		}
+
+		void Reset()
+		{
+			begin = C::now();
+		}
+	};
 }

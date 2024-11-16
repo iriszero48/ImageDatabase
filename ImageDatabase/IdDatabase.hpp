@@ -49,12 +49,19 @@ namespace ImageDatabase
 		template <WriteMode Mode, bool UseBuffer, typename Dataset, typename Stream>
 		static void BuildImplProc(Dataset& dataset, Stream& fs, Extractor& extractor, const RawData& raw)
 		{
-			LogInfo("build \"{}\"", raw.Path);
+			LogInfo("build {}", CuStr::FromDirtyUtf8String(CuStr::Combine(std::quoted(CuStr::ToDirtyUtf8StringView(raw.Path)))));
 
 			static std::mutex fsMtx{};
 
-			auto data = dataset.MakeData(extractor(raw));
+			Timer timer{};
+			auto exData = extractor(raw);
+			LogVerb("extractor {}ms", timer.Elapse().count());
 
+			timer.Reset();
+			auto data = dataset.MakeData(exData);
+			LogVerb("construct data {}ms", timer.Elapse().count());
+
+			timer.Reset();
 			if constexpr (Mode == WriteMode::Async) fsMtx.lock();
 
 			if constexpr (!UseBuffer)
@@ -67,13 +74,17 @@ namespace ImageDatabase
 			}
 
 			if constexpr (Mode == WriteMode::Async) fsMtx.unlock();
+			LogVerb("insert data {}ms", timer.Elapse().count());
 		}
 
 		template <typename DatasetType, bool UseBuffer>
 		void BuildImpl(const BuildParams& params)
 		{
+			Timer timer{};
+
 			DatasetType dataset;
 			dataset.Loads(params.OutputDatasetPath);
+			LogVerb("loads {}ms", timer.Elapse().count());
 
 			auto fs = dataset.CreateOutputStream(params.OutputDatasetPath);
 			Generator generator{params.ZipExtensions, params.Ignores, params.ExtDecoderList };
@@ -133,7 +144,9 @@ namespace ImageDatabase
 
 			if constexpr (UseBuffer)
 			{
+				timer.Reset();
 				for (auto& data : dataset) dataset.Dump(fs, data);
+				LogVerb("save {}ms", timer.Elapse().count());
 			}
 		}
 

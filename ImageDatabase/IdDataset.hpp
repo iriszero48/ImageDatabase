@@ -25,6 +25,7 @@ namespace ImageDatabase
 	using OcrType = std::u8string_view;
 	using BarcodeType = std::u8string_view;
 	using OrbType = std::span<uint8_t>;
+	using SiftType = std::span<float>;
 
 	struct DataRow
 	{
@@ -34,6 +35,7 @@ namespace ImageDatabase
 		OcrType Ocr;
 		BarcodeType Barcode;
 		OrbType Orb;
+		SiftType Sift;
 	};
 
 #define Id_Data_Prop(prop, setType) \
@@ -54,6 +56,7 @@ namespace ImageDatabase
 		Id_Data_Prop(Ocr, const OcrType&);
 		Id_Data_Prop(Barcode, const BarcodeType&);
 		Id_Data_Prop(Orb, const OrbType&);
+		Id_Data_Prop(Sift, const SiftType&);
 	};
 
 	struct JsonLinesData : IData<JsonLinesData>
@@ -79,6 +82,7 @@ namespace ImageDatabase
 		Id_Data_Has_Prop(Ocr);
 		Id_Data_Has_Prop(Barcode);
 		Id_Data_Has_Prop(Orb);
+		Id_Data_Has_Prop(Sift);
 
 		decltype(auto) GetPath()
 		{
@@ -140,6 +144,16 @@ namespace ImageDatabase
 		void SetOrb(const OrbType& v)
 		{
 			Data["orb"] = v;
+		}
+
+		decltype(auto) GetSift()
+		{
+			return Data["sift"].get<std::vector<float>>();
+		}
+
+		void SetSift(const SiftType& v)
+		{
+			Data["sift"] = v;
 		}
 	};
 
@@ -331,6 +345,7 @@ namespace ImageDatabase
 			data.SetOcr(row.Ocr);
 			data.SetBarcode(row.Barcode);
 			data.SetOrb(row.Orb);
+			data.SetSift(row.Sift);
 
 			return std::move(data);
 		}

@@ -155,6 +155,7 @@ namespace ImageDatabase
 
 			auto* text = api_->GetUTF8Text();
 			std::u8string ret = reinterpret_cast<char8_t*>(api_->GetUTF8Text());
+			LogVerb("ocr: {}", ret);
 			delete[] text;
 
 			api_->End();
@@ -184,7 +185,9 @@ namespace ImageDatabase
 			const auto barcodes = ReadBarcodes(image, options_);
 			auto data = nlohmann::json::array();
 			for (const auto& b : barcodes) data.push_back({ {ToString(b.format()), b.text()} });
-			return std::u8string(CuStr::FromDirtyUtf8String(data.dump()));
+			auto str = data.dump();
+			LogVerb("barcode: {}", str);
+			return std::u8string(CuStr::FromDirtyUtf8String(str));
 		}
 
 	private:
@@ -205,8 +208,8 @@ namespace ImageDatabase
 			orb_->detectAndCompute(raw.Image.Raw(), cv::noArray(), keyPoints, descriptors);
 
 			assert(descriptors.type() == CV_8UC1);
-
 			const auto size = descriptors.size().area();
+			LogVerb("orb: {}", size);
 			std::vector<uint8_t> ret;
 
 			if (size)
@@ -223,6 +226,38 @@ namespace ImageDatabase
 		cv::Ptr<cv::ORB> orb_;
 	};
 
+	struct SiftExtractor : IExtractor<SiftExtractor>
+	{
+		void Init()
+		{
+			orb_ = cv::SIFT::create();
+		}
+
+		std::vector<float> operator()(const RawData& raw)
+		{
+			cv::Mat descriptors;
+			std::vector<cv::KeyPoint> keyPoints;
+			orb_->detectAndCompute(raw.Image.Raw(), cv::noArray(), keyPoints, descriptors);
+
+			assert(descriptors.type() == CV_32FC1);
+			const auto size = descriptors.size().area();
+			LogVerb("sift: {}", size);
+			std::vector<float> ret;
+
+			if (size)
+			{
+				ret.reserve(size);
+				ret.resize(size);
+				std::copy(descriptors.begin<float>(), descriptors.end<float>(), ret.begin());
+			}
+
+			return ret;
+		}
+
+	private:
+		cv::Ptr<cv::SIFT> orb_;
+	};
+
 	struct Extractor : IExtractor<Extractor>
 	{
 		Md5Extractor Md5{};
@@ -230,6 +265,7 @@ namespace ImageDatabase
 		OcrExtractor Ocr{};
 		BarcodeExtractor Barcode{};
 		OrbExtractor Orb{};
+		SiftExtractor Sift{};
 
 		struct Row
 		{
@@ -239,6 +275,7 @@ namespace ImageDatabase
 			decltype(OcrExtractor{}({})) Ocr;
 			decltype(BarcodeExtractor{}({})) Barcode;
 			decltype(OrbExtractor{}({})) Orb;
+			decltype(SiftExtractor{}({})) Sift;
 
 			operator DataRow()
 			{
@@ -248,7 +285,8 @@ namespace ImageDatabase
 					Vgg16Type(Vgg16.data(), Vgg16.size()),
 					Ocr,
 					Barcode,
-					Orb
+					Orb,
+					Sift
 				};
 			}
 		};
@@ -260,18 +298,44 @@ namespace ImageDatabase
 			Ocr.Init();
 			Barcode.Init();
 			Orb.Init();
+			Sift.Init();
 		}
 
 		Row operator()(const RawData& data)
 		{
 			return {
 				data.Path,
-				Md5(data),
-				Vgg16(data),
-				Ocr(data),
-				Barcode(data),
-				Orb(data)
+				OperatorWarp(Md5, data),
+				OperatorWarp(Vgg16, data),
+				OperatorWarp(Ocr, data),
+				OperatorWarp(Barcode, data),
+				OperatorWarp(Orb, data),
+				OperatorWarp(Sift, data)
 			};
+		}
+
+	private:
+		template <typename T>
+		struct TimerWarp
+		{
+			Timer<> timer;
+
+			inline TimerWarp()
+			{
+				timer = Timer();
+			}
+
+			~TimerWarp()
+			{
+				LogVerb("{} {}ms", typeid(T).name(), timer.Elapse().count());
+			}
+		};
+
+		template <typename T>
+		decltype(auto) OperatorWarp(T& extractor, const RawData& data)
+		{
+			TimerWarp<T> timer{};
+			return extractor(data);
 		}
 	};
 }
