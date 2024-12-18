@@ -101,10 +101,58 @@ int main(const int argc, const char* argv[])
 	CuArgs::Argument<> langArg("--lang", "lang", "chi_sim+eng+chi_tra+jpn");
 	args.Add(inputArg, ignoresArg, decoderArg, deviceArg, threadArg, zipExtsArg, extDecoderArg, langArg);
 
-	CuArgs::Argument<std::filesystem::path> outputArg("-o", "output");
-	CuArgs::EnumArgument typeArg("--type", "DatasetType", ImageDatabase::DatasetType::JsonLines);
-	CuArgs::BoolArgument useBufferArg("--use-buffer", "use buffer");
-	args.Add(outputArg, typeArg, useBufferArg);
+	CuArgs::Argument<std::vector<std::filesystem::path>> datasetsArg(
+		"-d",
+		"datasets",
+		[](const auto& v)
+		{
+			return v
+				| std::views::split(';')
+				| std::views::transform([](const auto& x) { return std::filesystem::path(x.begin(), x.end()); })
+				| std::ranges::to<std::vector<std::filesystem::path>>();
+		},
+		[](const auto& v)
+		{
+			return v
+				| std::views::transform([](const auto& x) { return CuStr::ToString(x); })
+				| std::views::join_with(';')
+				| std::ranges::to<std::string>();
+		});
+	CuArgs::Argument<std::vector<ImageDatabase::DatasetType>> typesArg(
+		"--types",
+		"DatasetTypes",
+		[](const auto& v)
+		{
+			return v
+				| std::views::split(';')
+				| std::views::transform([](const auto& x) { return CuEnum::FromString<ImageDatabase::DatasetType>(std::string(x.begin(), x.end())).value(); })
+				| std::ranges::to<std::vector<ImageDatabase::DatasetType>>();
+		},
+		[](const auto& v)
+		{
+			return v
+				| std::views::transform([](const auto& x) { return CuEnum::ToString(x); })
+				| std::views::join_with(';')
+				| std::ranges::to<std::string>();
+		});
+	CuArgs::Argument<std::vector<bool>> useBufferArg(
+		"--use-buffer",
+		"use buffer",
+		[](const auto& v)
+		{
+			return v
+				| std::views::split(';')
+				| std::views::transform([](const auto& x) { return std::string(x.begin(), x.end()) == "true"; })
+				| std::ranges::to<std::vector<bool>>();
+		},
+		[](const auto& v)
+		{
+			return v
+				| std::views::transform([](const auto& x) -> std::string { return x ? "true" : "false"; })
+				| std::views::join_with(';')
+				| std::ranges::to<std::string>();
+		});
+	args.Add(datasetsArg, typesArg, useBufferArg);
 
 //#define NO_CATCH
 #ifndef NO_CATCH
@@ -119,6 +167,21 @@ int main(const int argc, const char* argv[])
 
 		LogInfo("\n{}", args.GetValuesDesc());
 
+		const auto datasets = args.Value(datasetsArg);
+		auto types = args.Get(typesArg);
+		auto useBuffer = args.Get(useBufferArg);
+
+		if (!types) {
+			types = std::vector<ImageDatabase::DatasetType>(datasets.size(), ImageDatabase::DatasetType::JsonLines);
+		}
+
+		if (!useBuffer) {
+			useBuffer = std::vector<bool>(datasets.size(), false);
+		}
+
+		CuAssert(datasets.size() == types.size());
+		CuAssert(datasets.size() == useBuffer.size());
+
 		switch (args.Value(operatorArg))
 		{
 		case ImageDatabase::Operator::Build:
@@ -131,11 +194,13 @@ int main(const int argc, const char* argv[])
 				args.Value(zipExtsArg),
 				args.Value(extDecoderArg),
 				args.Value(langArg),
-				args.Value(outputArg),
-				args.Value(typeArg),
-				args.Value(useBufferArg)
+				datasets,
+				types,
+				useBuffer
 			});
 			break;
+		case ImageDatabase::Operator::Query:
+
 		default:
 			break;
 		}

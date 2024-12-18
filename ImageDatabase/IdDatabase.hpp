@@ -10,7 +10,7 @@
 
 namespace ImageDatabase
 {
-	CuEnum_MakeEnumDef(Operator, Build);
+	CuEnum_MakeEnumDef(Operator, Build, Query);
 	CuEnum_MakeEnumDef(DatasetType, JsonLines, Binary);
 
 	struct LogParams
@@ -30,19 +30,31 @@ namespace ImageDatabase
 		std::string Languages;
 	};
 
-	struct OutputDatasetParams
+	struct DatasetParams
 	{
-		std::filesystem::path OutputDatasetPath;
-		DatasetType OutputDatasetType;
-		bool UseBuffer;
+		std::vector<std::filesystem::path> DatasetPaths;
+		std::vector<DatasetType> DatasetType;
+		std::vector<bool> UseBuffer;
 	};
 
-	struct BuildParams : InputParams, OutputDatasetParams
+	struct BuildParams : InputParams, ScanParams, OutputDatasetParams
+	{
+	};
+
+	struct QueryParams : InputParams, ScanParams
 	{
 	};
 
 	class Database
 	{
+		template <typename DatasetType, bool UseBuffer>
+		void BuildImpl(const BuildParams& params)
+		{
+			Timer timer{};
+
+			DatasetType dataset;
+			dataset.Loads(params.OutputDatasetPath);
+		}
 #pragma region Build
 		enum class WriteMode { Sync, Async };
 
@@ -184,6 +196,12 @@ namespace ImageDatabase
 		{
 			if (params.OutputDatasetType == DatasetType::JsonLines) BuildImplCall<JsonLinesDataset>(params);
 			else if (params.OutputDatasetType == DatasetType::Binary) BuildImplCall<BinaryDataset>(params);
+		}
+
+		void Query(const QueryParams& params)
+		{
+			  dataset;
+			dataset.Loads(params.OutputDatasetPath);
 		}
 	};
 }
