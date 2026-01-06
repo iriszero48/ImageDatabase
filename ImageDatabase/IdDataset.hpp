@@ -3,6 +3,7 @@
 #include <fstream>
 
 #include <nlohmann/json.hpp>
+#include <utility>
 
 #include "IdExcept.hpp"
 #include "IdUtils.hpp"
@@ -19,23 +20,28 @@ namespace ImageDatabase
 		CuImg::ImageBGR_OpenCV Image;
 	};
 
+	using HashMd5Type = std::span<std::uint8_t, 16>;
+
+	using FeatureVgg16Type = std::span<float, 512>;
+
+	using DescOrbType = std::span<uint8_t>;
+	using DescSiftType = std::span<float>;
+
 	using PathType = std::u8string_view;
-	using Md5Type = std::span<std::uint8_t, 16>;
-	using Vgg16Type = std::span<float, 512>;
+	using HashType = HashMd5Type;
+	using FeatureType = FeatureVgg16Type;
 	using OcrType = std::u8string_view;
 	using BarcodeType = std::u8string_view;
-	using OrbType = std::span<uint8_t>;
-	using SiftType = std::span<float>;
+	using DescType = DescOrbType;
 
 	struct DataRow
 	{
 		PathType Path;
-		Md5Type Md5;
-		Vgg16Type Vgg16;
+		HashType Hash;
+		FeatureType Feature;
 		OcrType Ocr;
 		BarcodeType Barcode;
-		OrbType Orb;
-		SiftType Sift;
+		DescType Desc;
 	};
 
 #define Id_Data_Prop(prop, setType) \
@@ -43,20 +49,17 @@ namespace ImageDatabase
 	void Set##prop(setType v) { static_cast<Impl*>(this)->Set##prop(v); } \
 	constexpr bool Has##prop() { return static_cast<Impl*>(this)->Has##prop(); }
 
-#define Id_Data_Has_Prop(prop) constexpr bool Has##prop() { return true; }
-
 	template <typename Impl>
 	struct IData
 	{
 		IData() = default;
 
 		Id_Data_Prop(Path, const PathType&);
-		Id_Data_Prop(Md5, const Md5Type&);
-		Id_Data_Prop(Vgg16, const Vgg16Type&);
+		Id_Data_Prop(Hash, const HashType&);
+		Id_Data_Prop(Feature, const FeatureType&);
 		Id_Data_Prop(Ocr, const OcrType&);
 		Id_Data_Prop(Barcode, const BarcodeType&);
-		Id_Data_Prop(Orb, const OrbType&);
-		Id_Data_Prop(Sift, const SiftType&);
+		Id_Data_Prop(Desc, const DescType&);
 	};
 
 	struct JsonLinesData : IData<JsonLinesData>
@@ -76,14 +79,6 @@ namespace ImageDatabase
 		JsonLinesData() = default;
 		explicit JsonLinesData(JsonType data) : Data(std::move(data)) {}
 
-		Id_Data_Has_Prop(Path);
-		Id_Data_Has_Prop(Md5);
-		Id_Data_Has_Prop(Vgg16);
-		Id_Data_Has_Prop(Ocr);
-		Id_Data_Has_Prop(Barcode);
-		Id_Data_Has_Prop(Orb);
-		Id_Data_Has_Prop(Sift);
-
 		decltype(auto) GetPath()
 		{
 			return GetStr("path");
@@ -94,26 +89,26 @@ namespace ImageDatabase
 			Data["path"] = JsonType::string_t(reinterpret_cast<const char*>(v.data()), v.length());
 		}
 
-		decltype(auto) GetMd5()
+		decltype(auto) GetHash()
 		{
-			std::array<Md5Type::element_type, Md5Type::extent> data{};
-			Data["md5"].get_to(data);
+			std::array<HashType::element_type, HashType::extent> data{};
+			Data["hash"].get_to(data);
 			return data;
 		}
 
-		void SetMd5(const Md5Type& v)
+		void SetHash(const HashType& v)
 		{
-			Data["md5"] = v;
+			Data["hash"] = v;
 		}
 
-		decltype(auto) GetVgg16()
+		decltype(auto) GetFeature()
 		{
-			return GetStr("vgg16");
+			return GetStr("feature");
 		}
 
-		void SetVgg16(const Vgg16Type& v)
+		void SetFeature(const FeatureType& v)
 		{
-			Data["vgg16"] = v;
+			Data["feature"] = v;
 		}
 
 		decltype(auto) GetOcr()
@@ -136,57 +131,40 @@ namespace ImageDatabase
 			Data["barcode"] = nlohmann::json::parse(CuStr::ToDirtyUtf8StringView(v));
 		}
 
-		decltype(auto) GetOrb()
+		decltype(auto) GetDesc()
 		{
-			return Data["orb"].get<std::vector<uint8_t>>();
+			return Data["desc"].get<std::vector<uint8_t>>();
 		}
 
-		void SetOrb(const OrbType& v)
+		void SetDesc(const DescType& v)
 		{
-			Data["orb"] = v;
-		}
-
-		decltype(auto) GetSift()
-		{
-			return Data["sift"].get<std::vector<float>>();
-		}
-
-		void SetSift(const SiftType& v)
-		{
-			Data["sift"] = v;
+			Data["desc"] = v;
 		}
 	};
 
 	struct BinaryData : IData<BinaryData>
 	{
 		StringPointer<char8_t> Path;
-		std::array<uint8_t, 16> Md5;
-		std::array<float, 512> Vgg16;
+		std::array<uint8_t, 16> Hash;
+		std::array<float, 512> Feature;
 		StringPointer<char8_t> Ocr;
 		StringPointer<char8_t> Barcode;
-		Pointer<uint8_t> Orb;
+		Pointer<uint8_t> Desc;
 
-		Id_Data_Has_Prop(Path);
-		Id_Data_Has_Prop(Md5);
-		Id_Data_Has_Prop(Vgg16);
-		Id_Data_Has_Prop(Ocr);
-		Id_Data_Has_Prop(Barcode);
-		Id_Data_Has_Prop(Orb);
-
-		static const std::string& Desc()
+		static const std::string& ColDesc()
 		{
 			static const auto desc = []
 			{
 				std::ostringstream desc{};
-#define Id_BinaryData_MakeDesc(var) sizeof(decltype(var)) << "=" << #var
+#define Id_BinaryData_MakeColDesc(var) sizeof(decltype(var)) << "=" << #var
 
 				desc << sizeof(BinaryData) << "|"
-					<< Id_BinaryData_MakeDesc(Path) << ","
-					<< Id_BinaryData_MakeDesc(Md5) << ","
-					<< Id_BinaryData_MakeDesc(Vgg16) << ","
-					<< Id_BinaryData_MakeDesc(Ocr) << ","
-					<< Id_BinaryData_MakeDesc(Barcode) << ","
-					<< Id_BinaryData_MakeDesc(Orb);
+					<< Id_BinaryData_MakeColDesc(Path) << ","
+					<< Id_BinaryData_MakeColDesc(Hash) << ","
+					<< Id_BinaryData_MakeColDesc(Feature) << ","
+					<< Id_BinaryData_MakeColDesc(Ocr) << ","
+					<< Id_BinaryData_MakeColDesc(Barcode) << ","
+					<< Id_BinaryData_MakeColDesc(Desc);
 
 				return desc.str();
 			}();
@@ -204,24 +182,24 @@ namespace ImageDatabase
 			Path = decltype(Path)::CopyFrom(v);
 		}
 
-		Md5Type GetMd5()
+		HashType GetHash()
 		{
-			return Md5;
+			return Hash;
 		}
 
-		void SetMd5(const Md5Type& v)
+		void SetHash(const HashType& v)
 		{
-			std::ranges::copy(v, Md5.begin());
+			std::ranges::copy(v, Hash.begin());
 		}
 
-		Vgg16Type GetVgg16()
+		FeatureType GetFeature()
 		{
-			return Vgg16;
+			return Feature;
 		}
 
-		void SetVgg16(const Vgg16Type& v)
+		void SetFeature(const FeatureType& v)
 		{
-			std::ranges::copy(v, Vgg16.begin());
+			std::ranges::copy(v, Feature.begin());
 		}
 
 		OcrType GetOcr()
@@ -244,23 +222,32 @@ namespace ImageDatabase
 			Barcode = Barcode.CopyFrom(v);
 		}
 
-		OrbType GetOrb()
+		DescType GetDesc()
 		{
-			return Orb;
+			return Desc;
 		}
 
-		void SetOrb(const OrbType& v)
+		void SetDesc(const DescType& v)
 		{
-			Orb = Orb.CopyFrom(v);
+			Desc = Desc.CopyFrom(v);
 		}
 	};
 
 	template <typename Impl, typename OutputStream, typename ValueType>
 	struct IDataset
 	{
-		decltype(auto) MakeData(const DataRow& row)
+		static ValueType MakeData(const DataRow& row)
 		{
-			return static_cast<Impl*>(this)->Insert(row);
+			ValueType data{};
+
+			data.SetPath(row.Path);
+			data.SetHash(row.Hash);
+			data.SetFeature(row.Feature);
+			data.SetOcr(row.Ocr);
+			data.SetBarcode(row.Barcode);
+			data.SetDesc(row.Desc);
+
+			return data;
 		}
 
 		void Loads(const std::filesystem::path& path)
@@ -284,10 +271,10 @@ namespace ImageDatabase
 			}
 		}
 
-		void Insert(ValueType value)
-		{
-			static_cast<Impl*>(this)->Insert(std::move(value));
-		}
+		// void Insert(ValueType value)
+		// {
+		// 	static_cast<Impl*>(this)->Insert(std::move(value));
+		// }
 
 		decltype(auto) begin()
 		{
@@ -309,7 +296,7 @@ namespace ImageDatabase
 	{
 		std::ofstream Stream;
 
-		FileOutputStream(const std::filesystem::path& path) : Stream(path, std::ios::out | std::ios::binary)
+		FileOutputStream(const std::filesystem::path& path) : Stream(path, std::ios::out | std::ios::binary | std::ios::app)
 		{
 			if (!Stream) throw Id_MakeExcept("create stream error");
 		}
@@ -320,12 +307,12 @@ namespace ImageDatabase
 		std::ofstream DataStream;
 		std::ofstream IndexStream;
 
-		BinaryOutputStream(const std::filesystem::path& path) : DataStream(path, std::ios::out | std::ios::binary), IndexStream(path.parent_path() / (path.filename().u8string() + u8".index"), std::ios::out | std::ios::binary)
+		BinaryOutputStream(const std::filesystem::path& path) : DataStream(path, std::ios::out | std::ios::binary | std::ios::app), IndexStream(path.parent_path() / (path.filename().u8string() + u8".index"), std::ios::out | std::ios::binary)
 		{
 			if (!DataStream) throw Id_MakeExcept("create stream error");
 			if (!IndexStream) throw Id_MakeExcept("create stream error");
 
-			CuFile::WriteAllText(path.parent_path() / (path.filename().u8string() + u8".desc"), BinaryData::Desc());
+			CuFile::WriteAllText(path.parent_path() / (path.filename().u8string() + u8".desc"), BinaryData::ColDesc());
 		}
 	};
 
@@ -340,14 +327,13 @@ namespace ImageDatabase
 			JsonLinesData data{};
 
 			data.SetPath(row.Path);
-			data.SetMd5(row.Md5);
-			data.SetVgg16(row.Vgg16);
+			data.SetHash(row.Hash);
+			data.SetFeature(row.Feature);
 			data.SetOcr(row.Ocr);
 			data.SetBarcode(row.Barcode);
-			data.SetOrb(row.Orb);
-			data.SetSift(row.Sift);
+			data.SetDesc(row.Desc);
 
-			return std::move(data);
+			return data;
 		}
 
 		void Loads(const std::filesystem::path& path)
@@ -370,6 +356,7 @@ namespace ImageDatabase
 		static void Dump(FileOutputStream& stream, const ValueType& it)
 		{
 			stream.Stream << it.Data << '\n';
+			stream.Stream.flush();
 		}
 
 		decltype(Data)::iterator begin()
@@ -382,10 +369,10 @@ namespace ImageDatabase
 			return Data.end();
 		}
 
-		void Insert(ValueType value)
-		{
-			Data.push_back(std::move(value));
-		}
+		// void Insert(ValueType value)
+		// {
+		// 	Data.push_back(std::move(value));
+		// }
 
 		static FileOutputStream CreateOutputStream(const std::filesystem::path& path)
 		{
@@ -395,28 +382,86 @@ namespace ImageDatabase
 
 	struct BinaryDataset : IDataset<BinaryDataset, BinaryOutputStream, BinaryData>
 	{
-		std::vector<BinaryData> Data{};
+		std::vector<uint64_t> Indexes{};
+		std::filesystem::path Path{};
 
 		using ValueType = BinaryData;
 
-		static ValueType MakeData(const DataRow& row)
+		class iterator
 		{
-			BinaryData data{};
+			const std::filesystem::path* path_ = nullptr;
+			std::vector<uint64_t>::iterator it_{};
+			std::vector<uint64_t>::iterator end_{};
+			std::unique_ptr<ValueType> current_{};
 
-			data.SetPath(row.Path);
-			data.SetMd5(row.Md5);
-			data.SetVgg16(row.Vgg16);
-			data.SetOcr(row.Ocr);
-			data.SetBarcode(row.Barcode);
-			data.SetOrb(row.Orb);
+		public:
+			using iterator_category = std::random_access_iterator_tag;
+			using value_type = BinaryData;
+			using difference_type = int64_t;
+			using pointer = value_type *;
+			using reference = value_type &;
 
-			return data;
-		}
+			iterator() = default;
+			iterator(const std::filesystem::path& path, std::vector<uint64_t>::iterator it, std::vector<uint64_t>::iterator end) : path_(&path), it_(std::move(it)), end_(std::move(end)) {}
+			iterator(const iterator& it) {
+				path_ = it.path_;
+				it_ = it.it_;
+			}
+
+			iterator &operator++()
+			{
+				current_.reset();
+				++it_;
+				return *this;
+			}
+			iterator operator++(int)
+			{
+				iterator retVal = *this;
+				++(*this);
+				return retVal;
+			}
+
+			bool operator==(iterator other) const {
+				return it_ == other.it_;
+			}
+			bool operator!=(iterator other) const {
+				return !(*this == other);
+			}
+			bool operator<(iterator other) const {
+				return it_ < other.it_;
+			}
+
+			reference operator*() {
+				if (!current_) {
+					std::ifstream fs(*path_, std::ios::binary | std::ios::in);
+					fs.seekg(*it_);
+
+					Serialization::Deserialize fsDeserialize(fs);
+					auto path = fsDeserialize.Read<std::u8string>();
+					auto hash = fsDeserialize.ReadArray<uint8_t, 16>();
+					auto feat = fsDeserialize.ReadArray<float, 512>();
+					auto ocr = fsDeserialize.Read<std::u8string>();
+					auto barcode = fsDeserialize.Read<std::u8string>();
+					auto desc = fsDeserialize.Read<std::vector<uint8_t>>();
+
+					current_ = std::make_unique<ValueType>(MakeData({
+						path, hash, feat, ocr, barcode, desc
+					}));
+				}
+
+				return *current_;
+			}
+			difference_type operator-(iterator other) const {
+				return it_ - other.it_;
+			}
+		};
 
 		void Loads(const std::filesystem::path& path)
 		{
-			std::ifstream fs(path, std::ios::in | std::ios::binary);
-			if (!fs) return;
+			{
+				std::ifstream fs(path, std::ios::in | std::ios::binary);
+				if (!fs) return;
+			}
 
 			const auto indexPath = path.parent_path() / (path.filename().u8string() + u8".index");
 			const auto descPath = path.parent_path() / (path.filename().u8string() + u8".desc");
@@ -424,10 +469,9 @@ namespace ImageDatabase
 			std::ifstream indexFs(indexPath, std::ios::in | std::ios::binary);
 			if (!indexFs) return;
 
-			const auto desc = CuFile::ReadAllText(descPath);
-			if (desc != BinaryData::Desc())
+			if (const auto desc = CuFile::ReadAllText(descPath); desc != BinaryData::ColDesc())
 			{
-				LogErr("mismatch desc: {} <=> {}", desc, BinaryData::Desc());
+				LogErr("mismatch desc: {} <=> {}", desc, BinaryData::ColDesc());
 				return;
 			}
 
@@ -441,40 +485,27 @@ namespace ImageDatabase
 			const auto indexSize = indexFileSize / sizeof(uint64_t);
 
 			Serialization::Deserialize indexDeserialize(indexFs);
-			std::vector<uint64_t> indexes(indexSize);
+			Indexes.resize(indexSize);
 			for (uint64_t i = 0; i < indexSize; ++i)
 			{
-				indexes[i] = indexDeserialize.Read<uint64_t>();
+				Indexes[i] = indexDeserialize.Read<uint64_t>();
 			}
+			Indexes.shrink_to_fit();
 
-			Serialization::Deserialize fsDeserialize(fs);
-			for (uint64_t i = 0; i < indexSize; ++i)
-			{
-				fs.seekg(indexes[i]);
-
-				auto p = fsDeserialize.Read<std::u8string>();
-				auto md5 = fsDeserialize.ReadArray<uint8_t, 16>();
-				auto vgg16 = fsDeserialize.ReadArray<float, 512>();
-				auto ocr = fsDeserialize.Read<std::u8string>();
-				auto barcode = fsDeserialize.Read<std::u8string>();
-				auto orb = fsDeserialize.Read<std::vector<uint8_t>>();
-
-				Insert(MakeData({ p, md5, vgg16, ocr, barcode, orb }));
-			}
-
-			Data.shrink_to_fit();
+			Path = path;
 		}
 
 		static void Dump(BinaryOutputStream& stream, ValueType& it)
 		{
-			auto pos = stream.DataStream.tellp();
+			const auto pos = stream.DataStream.tellp();
 
 			Serialization::Serialize serialize(stream.DataStream);
 			serialize.Write(static_cast<std::u8string_view>(it.Path));
-			serialize.WriteArray(static_cast<Md5Type>(it.Md5));
-			serialize.WriteArray(static_cast<Vgg16Type>(it.Vgg16));
-			serialize.Write(static_cast<std::u8string_view>(it.Ocr), static_cast<std::u8string_view>(it.Barcode));
-			serialize.WriteArray(static_cast<OrbType>(it.Orb));
+			serialize.WriteArray(static_cast<HashType>(it.Hash));
+			serialize.WriteArray(static_cast<FeatureType>(it.Feature));
+			serialize.Write(static_cast<std::u8string_view>(it.Ocr));
+			serialize.Write(static_cast<std::u8string_view>(it.Barcode));
+			serialize.WriteArray(static_cast<DescType>(it.Desc));
 			stream.DataStream.flush();
 
 			Serialization::Serialize indexSerialize(stream.IndexStream);
@@ -482,20 +513,20 @@ namespace ImageDatabase
 			stream.IndexStream.flush();
 		}
 
-		decltype(Data)::iterator begin()
+		iterator begin()
 		{
-			return Data.begin();
+			return {Path, Indexes.begin(), Indexes.end()};
 		}
 
-		decltype(Data)::iterator end()
+		iterator end()
 		{
-			return Data.end();
+			return {{}, Indexes.end(), Indexes.end()};
 		}
 
-		void Insert(ValueType value)
-		{
-			Data.push_back(std::move(value));
-		}
+		// void Insert(ValueType value)
+		// {
+		// 	Data.push_back(std::move(value));
+		// }
 
 		static BinaryOutputStream CreateOutputStream(const std::filesystem::path& path)
 		{

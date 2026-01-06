@@ -32,33 +32,23 @@ namespace ImageDatabase
 
 	struct DatasetParams
 	{
-		std::vector<std::filesystem::path> DatasetPaths;
-		std::vector<DatasetType> DatasetType;
-		std::vector<bool> UseBuffer;
+		std::vector<std::pair<std::filesystem::path, DatasetType>> DatasetFiles{};
 	};
 
-	struct BuildParams : InputParams, ScanParams, OutputDatasetParams
+	struct BuildParams : InputParams, DatasetParams
 	{
 	};
 
-	struct QueryParams : InputParams, ScanParams
+	struct QueryParams : InputParams, DatasetParams
 	{
 	};
 
 	class Database
 	{
-		template <typename DatasetType, bool UseBuffer>
-		void BuildImpl(const BuildParams& params)
-		{
-			Timer timer{};
-
-			DatasetType dataset;
-			dataset.Loads(params.OutputDatasetPath);
-		}
 #pragma region Build
 		enum class WriteMode { Sync, Async };
 
-		template <WriteMode Mode, bool UseBuffer, typename Dataset, typename Stream>
+		template <WriteMode Mode, typename Dataset, typename Stream>
 		static void BuildImplProc(Dataset& dataset, Stream& fs, Extractor& extractor, const RawData& raw)
 		{
 			LogInfo("build {}", CuStr::FromDirtyUtf8String(CuStr::Combine(std::quoted(CuStr::ToDirtyUtf8StringView(raw.Path)))));
@@ -76,44 +66,48 @@ namespace ImageDatabase
 			timer.Reset();
 			if constexpr (Mode == WriteMode::Async) fsMtx.lock();
 
-			if constexpr (!UseBuffer)
-			{
-				dataset.Dump(fs, data);
-			}
-			else
-			{
-				dataset.Insert(std::move(data));
-			}
+			dataset.Dump(fs, data);
 
 			if constexpr (Mode == WriteMode::Async) fsMtx.unlock();
 			LogVerb("insert data {}ms", timer.Elapse().count());
 		}
 
-		template <typename DatasetType, bool UseBuffer>
+		template <typename DatasetType>
 		void BuildImpl(const BuildParams& params)
 		{
 			Timer timer{};
 
+			std::filesystem::path datasetPath{};
+			if (params.DatasetFiles.empty())
+			{
+				throw std::invalid_argument("No dataset files specified");
+			}
+			if (params.DatasetFiles.size() > 1)
+			{
+				LogWarn("Multiple dataset files specified, only the first one will be used");
+			}
+			datasetPath = params.DatasetFiles.at(0).first;
+
 			DatasetType dataset;
-			dataset.Loads(params.OutputDatasetPath);
+			dataset.Loads(datasetPath);
 			LogVerb("loads {}ms", timer.Elapse().count());
 
-			auto fs = dataset.CreateOutputStream(params.OutputDatasetPath);
+std::unordered_set<std::u8string> paths{};
+			for (auto& data : dataset) {
+				paths.emplace(data.GetPath());
+			}
+
+			auto fs = dataset.CreateOutputStream(datasetPath);
 			Generator generator{params.ZipExtensions, params.Ignores, params.ExtDecoderList };
 
 			const auto createExtractor = [&]()
 			{
 				auto extractor = std::make_unique<Extractor>();
-				extractor->Vgg16.PreferableDevice = params.ExtractorDevice;
-				extractor->Ocr.Languages = params.Languages;
+				extractor->Feature.PreferableDevice = params.ExtractorDevice;
+				// extractor->Ocr.Languages = params.Languages;
 				extractor->Init();
 				return extractor;
 			};
-
-			if constexpr (!UseBuffer)
-			{
-				for (auto& data : dataset) dataset.Dump(fs, data);
-			}
 
 			if (params.Thread == 1)
 			{
@@ -121,7 +115,7 @@ namespace ImageDatabase
 
 				for (auto* rawData : generator.Scan(params.Input))
 				{
-					BuildImplProc<WriteMode::Sync, UseBuffer>(dataset, fs, *extractor, *rawData);
+					BuildImplProc<WriteMode::Sync>(dataset, fs, *extractor, *rawData);
 				}
 			}
 			else
@@ -142,7 +136,7 @@ namespace ImageDatabase
 							auto raw = queue.Read();
 							if (raw.Path.empty()) break;
 
-							BuildImplProc<WriteMode::Async, UseBuffer>(dataset, fs, *extractor, raw);
+							BuildImplProc<WriteMode::Async>(dataset, fs, *extractor, raw);
 						}
 					});
 				}
@@ -153,20 +147,12 @@ namespace ImageDatabase
 
 				for (auto& t : threads) if (t.joinable()) t.join();
 			}
-
-			if constexpr (UseBuffer)
-			{
-				timer.Reset();
-				for (auto& data : dataset) dataset.Dump(fs, data);
-				LogVerb("save {}ms", timer.Elapse().count());
-			}
 		}
 
 		template <typename DatasetType>
 		void BuildImplCall(const BuildParams& params)
 		{
-			if (params.UseBuffer) BuildImpl<DatasetType, true>(params);
-			else BuildImpl<DatasetType, false>(params);
+			BuildImpl<DatasetType>(params);
 		}
 #pragma endregion
 
@@ -194,14 +180,13 @@ namespace ImageDatabase
 
 		void Build(const BuildParams& params)
 		{
-			if (params.OutputDatasetType == DatasetType::JsonLines) BuildImplCall<JsonLinesDataset>(params);
-			else if (params.OutputDatasetType == DatasetType::Binary) BuildImplCall<BinaryDataset>(params);
+			if (params.DatasetFiles.at(0).second == DatasetType::JsonLines) BuildImplCall<JsonLinesDataset>(params);
+			else if (params.DatasetFiles.at(0).second == DatasetType::Binary) BuildImplCall<BinaryDataset>(params);
 		}
 
 		void Query(const QueryParams& params)
 		{
-			  dataset;
-			dataset.Loads(params.OutputDatasetPath);
+
 		}
 	};
 }

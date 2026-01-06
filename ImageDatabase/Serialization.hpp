@@ -119,7 +119,7 @@ namespace Serialization
         template <typename T, size_t S>
         void WriteArray(const std::span<T, S>& arr)
         {
-            if constexpr (S == std::dynamic_extent) Write<uint64_t>(S);
+            if constexpr (S == std::dynamic_extent) Write<uint64_t>(arr.size());
             for (const auto& v : arr) Write(v);
         }
     private:

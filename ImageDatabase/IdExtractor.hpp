@@ -3,12 +3,20 @@
 #include <Enum/Enum.hpp>
 #include <File/File.hpp>
 #include <Cryptography/Md5.hpp>
+#include <Cryptography/Base64.hpp>
 #include <Image/Image.hpp>
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/cudafeatures2d.hpp>
 #include <Eigen/Eigen>
 #include <tesseract/baseapi.h>
 #include <ZXing/ReadBarcode.h>
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
+#ifdef ID_ENABLE_RAPID_OCR_NCNN
+#include <OcrLite.h>
+#endif
 
 #include "IdExcept.hpp"
 #include "IdDataset.hpp"
@@ -18,7 +26,7 @@
 namespace ImageDatabase
 {
 	// ReSharper disable CppInconsistentNaming
-	CuEnum_MakeEnumDef(Device, cpu, cuda, opencl);
+	CuEnum_MakeEnumDef(Device, cpu, cuda, opencl, vulkan);
 	// ReSharper restore CppInconsistentNaming
 
 	template <typename T>
@@ -37,9 +45,11 @@ namespace ImageDatabase
 
 	struct Md5Extractor : IExtractor<Md5Extractor>
 	{
+		using ValueType = std::array<uint8_t, 16>;
+
 		static void Init() {}
 
-		std::array<uint8_t, 16> operator()(const RawData& data) const
+		ValueType operator()(const RawData& data) const
 		{
 			CuCrypto::Md5 md5;
 			const auto linesize = data.Image.Linesize();
@@ -65,6 +75,8 @@ namespace ImageDatabase
 
 	struct Vgg16Extractor : IExtractor<Vgg16Extractor>
 	{
+		using ValueType = Eigen::Matrix<float, 512, 1>;
+
 		std::string ProtoTxtPath = "vgg16-deploy.prototxt";
 		std::string CaffeModelPath = "vgg16.caffemodel";
 		Device PreferableDevice = Device::cuda;
@@ -96,9 +108,15 @@ namespace ImageDatabase
 				vgg16_.setPreferableBackend(cv::dnn::DNN_BACKEND_DEFAULT);
 				vgg16_.setPreferableTarget(cv::dnn::DNN_TARGET_OPENCL);
 			}
+
+			if (PreferableDevice == Device::vulkan)
+			{
+				vgg16_.setPreferableBackend(cv::dnn::DNN_BACKEND_VKCOM);
+				vgg16_.setPreferableTarget(cv::dnn::DNN_TARGET_VULKAN);
+			}
 		}
 
-		decltype(auto) operator()(const RawData& data)
+		ValueType operator()(const RawData& data)
 		{
 			vgg16_.setInput(cv::dnn::blobFromImage(data.Image.Raw(), 1., cv::Size(224, 224), cv::Scalar(123.68, 116.779, 103.939), false));
 			auto feat = vgg16_.forward();
@@ -130,8 +148,10 @@ namespace ImageDatabase
 		}
 	};
 
-	struct OcrExtractor : IExtractor<OcrExtractor>
+	struct TesseractOcrExtractor : IExtractor<TesseractOcrExtractor>
 	{
+		using ValueType = std::u8string;
+
 		std::string Languages = "chi_sim+eng+chi_tra+jpn";
 
 		void Init()
@@ -139,7 +159,7 @@ namespace ImageDatabase
 			
 		}
 
-		std::u8string operator()(const RawData& data)
+		ValueType operator()(const RawData& data)
 		{
 			auto api_ = std::make_unique<tesseract::TessBaseAPI>();
 			if (api_->Init("tessdata", Languages.c_str())) {
@@ -163,7 +183,7 @@ namespace ImageDatabase
 			return ret;
 		}
 
-		~OcrExtractor()
+		~TesseractOcrExtractor()
 		{
 
 		}
@@ -172,14 +192,123 @@ namespace ImageDatabase
 		std::unique_ptr<tesseract::TessBaseAPI> api_;
 	};
 
+	struct PaddleXServingOcrExtractor : IExtractor<PaddleXServingOcrExtractor>
+	{
+		using ValueType = std::u8string;
+
+		std::string Host = "192.168.0.100";
+		uint16_t Port = 8080;
+		std::string Url = "/ocr";
+
+		void Init()
+		{
+
+		}
+
+		ValueType operator()(const RawData& data)
+		{
+			if (!client_)
+			{
+				LogVerb("connect to {}:{}...", Host, Port);
+				client_ = std::make_unique<httplib::Client>(Host, Port);
+			}
+
+			std::vector<uint8_t> img{};
+			cv::imencode(".png", data.Image.Raw(), img);
+
+			CuCrypto::Base64 base64(true);
+			auto b64 = base64.Encode(std::string_view(reinterpret_cast<const char *>(img.data()), img.size()));
+
+			const nlohmann::json jsonObj
+			{
+				{"file", b64},
+				{"fileType", 1.},
+				{"visualize", false}
+			};
+
+			const auto response = client_->Post(Url, jsonObj.dump(), "application/json");
+			if (response && response->status == 200) {
+				const auto& jsonResponse = nlohmann::json::parse(response->body);
+				const auto& result = jsonResponse["result"]["ocrResults"][0]["prunedResult"]["rec_texts"];
+				const auto rec_texts = result.get<std::vector<std::string>>();
+				const auto text = CuStr::Join(rec_texts.begin(), rec_texts.end(), "\n");
+				const auto u8Texts = CuStr::FromDirtyUtf8String(text);
+				LogVerb("ocr: {}", CuStr::FromDirtyUtf8String(nlohmann::json(text).dump()));
+
+				return static_cast<std::u8string>(u8Texts);
+			}
+
+			if (response) {
+				LogErr("HTTP status code: {}", response->status);
+			} else {
+				LogErr("Failed to send HTTP request.");
+			}
+
+			client_.reset();
+			return {};
+		}
+
+	private:
+		std::unique_ptr<httplib::Client> client_{};
+	};
+
+	struct RapidOcrNcnnOcrExtractor : IExtractor<RapidOcrNcnnOcrExtractor>
+	{
+		using ValueType = std::u8string;
+
+		std::string DetPath = "PP_OCRv5_server_det_infer.ncnn";
+		std::string ClsPath = "PP_LCNet_x1_0_doc_ori_infer.ncnn";
+		std::string RecPath = "PP_OCRv5_server_rec_infer.ncnn";
+		std::string KeysPath = "PP-OCRv5_server_rec_infer.yml";
+
+		void Init()
+		{
+#ifdef ID_ENABLE_RAPID_OCR_NCNN
+			auto ocr = std::make_unique<OcrLite>();
+			ocr->setNumThread(1);
+			ocr->initLogger(true, false, false);
+			ocr->setGpuIndex(-1);
+			if (!ocr->initModels(DetPath, ClsPath, RecPath, KeysPath))
+			{
+				throw Id_MakeApiExcept("OcrLite::initModels", "init model failed");
+			}
+
+			ocr_ = std::move(ocr);
+#else
+			assert(false);
+#endif
+		}
+
+		ValueType operator()(const RawData& data)
+		{
+#ifdef ID_ENABLE_RAPID_OCR_NCNN
+			const auto result = ocr_->detect(data.Image.Raw(),
+				50, 1024, 0.5f, 0.3f, 1.6f, true, true);
+			const auto resutlU8 = CuStr::FromDirtyUtf8String(result.strRes);
+			LogVerb("ocr: {}", resutlU8);
+			return std::u8string(resutlU8);
+#else
+			assert(false);
+			return {};
+#endif
+		}
+
+	private:
+#ifdef ID_ENABLE_RAPID_OCR_NCNN
+		std::unique_ptr<OcrLite> ocr_{};
+#endif
+	};
+
 	struct BarcodeExtractor : IExtractor<BarcodeExtractor>
 	{
+		using ValueType = std::u8string;
+
 		void Init()
 		{
 			options_ = ZXing::ReaderOptions().setFormats(ZXing::BarcodeFormat::Any);
 		}
 
-		std::u8string operator()(const RawData& raw)
+		ValueType operator()(const RawData& raw)
 		{
 			const auto image = ZXing::ImageView(raw.Image.Data(), raw.Image.Width(), raw.Image.Height(), ZXing::ImageFormat::BGR, raw.Image.Linesize(), decltype(raw.Image)::PixelType::ColorSize());
 			const auto barcodes = ReadBarcodes(image, options_);
@@ -194,18 +323,31 @@ namespace ImageDatabase
 		ZXing::ReaderOptions options_;
 	};
 
-	struct OrbExtractor : IExtractor<OrbExtractor>
+	template <typename Impl>
+	struct CvOrbBaseDescExtractor : IExtractor<CvOrbBaseDescExtractor<Impl>>
 	{
+		using ValueType = std::vector<uint8_t>;
+
 		void Init()
 		{
-			orb_ = cv::ORB::create();
+			orb_ = Impl::create();
 		}
 
-		std::vector<uint8_t> operator()(const RawData& raw)
+		ValueType operator()(const RawData& raw)
 		{
+			cv::cuda::GpuMat gpuData{};
+
+			cv::_InputArray toDet{};
+			if constexpr (std::is_same_v<Impl, cv::cuda::ORB>) {
+				gpuData.upload(raw.Image.Raw());
+				toDet = gpuData;
+			} else {
+				toDet = raw.Image.Raw();
+			}
+
 			cv::Mat descriptors;
 			std::vector<cv::KeyPoint> keyPoints;
-			orb_->detectAndCompute(raw.Image.Raw(), cv::noArray(), keyPoints, descriptors);
+			orb_->detectAndCompute(toDet, cv::noArray(), keyPoints, descriptors);
 
 			assert(descriptors.type() == CV_8UC1);
 			const auto size = descriptors.size().area();
@@ -223,17 +365,22 @@ namespace ImageDatabase
 		}
 
 	private:
-		cv::Ptr<cv::ORB> orb_;
+		cv::Ptr<Impl> orb_;
 	};
+
+	using CvOrbDescExtractor = CvOrbBaseDescExtractor<cv::ORB>;
+	using CvCudaOrbDescExtractor = CvOrbBaseDescExtractor<cv::cuda::ORB>;
 
 	struct SiftExtractor : IExtractor<SiftExtractor>
 	{
+		using ValueType = std::vector<float>;
+
 		void Init()
 		{
 			orb_ = cv::SIFT::create();
 		}
 
-		std::vector<float> operator()(const RawData& raw)
+		ValueType operator()(const RawData& raw)
 		{
 			cv::Mat descriptors;
 			std::vector<cv::KeyPoint> keyPoints;
@@ -260,57 +407,59 @@ namespace ImageDatabase
 
 	struct Extractor : IExtractor<Extractor>
 	{
-		Md5Extractor Md5{};
-		Vgg16Extractor Vgg16{};
+		using HashExtractor = Md5Extractor;
+		using FeatureExtractor = Vgg16Extractor;
+		using OcrExtractor = PaddleXServingOcrExtractor;
+		// using OcrExtractor = RapidOcrNcnnOcrExtractor;
+		using BarcodeExtractor = BarcodeExtractor;
+		using DescExtractor = CvOrbDescExtractor;
+
+		HashExtractor Hash{};
+		FeatureExtractor Feature{};
 		OcrExtractor Ocr{};
 		BarcodeExtractor Barcode{};
-		OrbExtractor Orb{};
-		SiftExtractor Sift{};
+		DescExtractor Desc{};
 
 		struct Row
 		{
 			std::u8string Path;
-			decltype(Md5Extractor{}({})) Md5;
-			decltype(Vgg16Extractor{}({})) Vgg16;
-			decltype(OcrExtractor{}({})) Ocr;
-			decltype(BarcodeExtractor{}({})) Barcode;
-			decltype(OrbExtractor{}({})) Orb;
-			decltype(SiftExtractor{}({})) Sift;
+			HashExtractor::ValueType Hash;
+			FeatureExtractor::ValueType Feature;
+			OcrExtractor::ValueType Ocr;
+			BarcodeExtractor::ValueType Barcode;
+			DescExtractor::ValueType Desc;
 
 			operator DataRow()
 			{
 				return {
 					Path,
-					Md5,
-					Vgg16Type(Vgg16.data(), Vgg16.size()),
+					Hash,
+					FeatureType(Feature.data(), Feature.size()),
 					Ocr,
 					Barcode,
-					Orb,
-					Sift
+					Desc
 				};
 			}
 		};
 
 		void Init()
 		{
-			Md5.Init();
-			Vgg16.Init();
+			Hash.Init();
+			Feature.Init();
 			Ocr.Init();
 			Barcode.Init();
-			Orb.Init();
-			Sift.Init();
+			Desc.Init();
 		}
 
 		Row operator()(const RawData& data)
 		{
 			return {
 				data.Path,
-				OperatorWarp(Md5, data),
-				OperatorWarp(Vgg16, data),
+				OperatorWarp(Hash, data),
+				OperatorWarp(Feature, data),
 				OperatorWarp(Ocr, data),
 				OperatorWarp(Barcode, data),
-				OperatorWarp(Orb, data),
-				OperatorWarp(Sift, data)
+				OperatorWarp(Desc, data)
 			};
 		}
 
@@ -331,8 +480,8 @@ namespace ImageDatabase
 			}
 		};
 
-		template <typename T>
-		decltype(auto) OperatorWarp(T& extractor, const RawData& data)
+		template <typename T, typename R = typename T::ValueType>
+		static R OperatorWarp(T& extractor, const RawData& data)
 		{
 			TimerWarp<T> timer{};
 			return extractor(data);

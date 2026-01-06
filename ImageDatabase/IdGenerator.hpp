@@ -14,12 +14,14 @@
 
 #define Id_Yields(expr) for (auto* _value : (expr)) co_yield _value;
 
-namespace ImageDatabase
-{
-	CuEnum_MakeEnumDef(Decoder,
+CuEnum_MakeEnum(ImageDatabase_Impl_Decoder,
 		FFmpeg = 0x0001,
 		GraphicsMagick = 0x0010,
 		DirectXTex = 0x0100);
+
+namespace ImageDatabase
+{
+	using Decoder = ImageDatabase_Impl_Decoder;
 
 	struct Generator
 	{
@@ -448,5 +450,3 @@ namespace ImageDatabase
 		}
 	};
 }
-
-CuEnum_MakeEnumSpec(ImageDatabase, Decoder);

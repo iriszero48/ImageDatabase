@@ -2,10 +2,12 @@ cmake_minimum_required(VERSION 3.9)
 project(imgdb VERSION 1.0)
 include(CMakePrintHelpers)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
+
+option(RAPID_OCR_NCNN_DIR "Path to RapidOcrNcnn" "")
 
 set(CU_ROOT "CppUtility")
 cmake_print_variables(CU_ROOT)
@@ -17,6 +19,7 @@ find_package(libzip CONFIG REQUIRED)
 find_package(Boost CONFIG REQUIRED system)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(ZXing CONFIG REQUIRED)
+find_package(httplib REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 
@@ -59,9 +62,15 @@ else ()
     set(ID_DXTEX_LIBS)
 endif ()
 
+set(ID_INCS
+        "ImageDatabase"
+        ${FFMPEG_INCLUDE_DIRS}
+        ${CU_ROOT}
+)
+
 set(ID_LIBS
     Eigen3::Eigen
-    opencv_core opencv_imgcodecs opencv_dnn opencv_highgui opencv_features2d
+    opencv_core opencv_imgcodecs opencv_dnn opencv_highgui opencv_features2d opencv_cudafeatures2d
     libzip::zip
     ${ID_FFMPEG_LIBS}
     ${ID_GRAPHICSMAGICK_LIBS}
@@ -69,6 +78,7 @@ set(ID_LIBS
     ${ID_DXTEX_LIBS}
     ${ID_TESSETACT_LIBS}
     ZXing::ZXing
+    httplib::httplib
 )
 
 set(ID_DEFS
@@ -77,8 +87,6 @@ set(ID_DEFS
 
     CU_IMG_HAS_OPENCV
     CU_IMG_HAS_GRAPHICSMAGICK
-
-    CU_EXCEPTION_USE_BOOST_STACKTRACE
 )
 
 if (directxtex_FOUND)
@@ -88,19 +96,20 @@ endif()
 if (UNIX)
     find_package(TBB CONFIG REQUIRED)
     list(APPEND ID_LIBS TBB::tbb)
+
+    list(APPEND ID_DEFS CU_UTILITY_USE_BOOST_STACKTRACE)
 endif()
 
+if (RAPID_OCR_NCNN_DIR)
+    list(APPEND ID_DEFS ID_ENABLE_RAPID_OCR_NCNN)
+
+    list(APPEND ID_INCS ${RAPID_OCR_NCNN_DIR}/include)
+    list(APPEND ID_LIBS ${RAPID_OCR_NCNN_DIR}/lib/libRapidOcrNcnn.so)
+endif()
 
 add_executable(imgdb "ImageDatabase/main.cpp" ${CU_FILES})
-
 target_compile_definitions(imgdb PRIVATE ${ID_DEFS})
-
-target_include_directories(imgdb PRIVATE
-    "ImageDatabase"
-    ${FFMPEG_INCLUDE_DIRS}
-    ${CU_ROOT}
-)
-
+target_include_directories(imgdb PRIVATE ${ID_INCS})
 target_link_libraries(imgdb PRIVATE ${ID_LIBS})
 
 if (WIN32)

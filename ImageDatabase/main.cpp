@@ -4,23 +4,35 @@
 
 #include <boost/config.hpp>
 #include <boost/version.hpp>
-#include <ZXing/ZXVersion.h>
+#include <ZXing/Version.h>
+#ifdef ID_ENABLE_RAPID_OCR_NCNN
+#include <version.h>
+#endif
+
+#ifdef CU_IMG_HAS_DIRECTXTEX
 #include <DirectXTex.h>
+#endif
 
 int main(const int argc, const char* argv[])
 {
-	CuConsole::WriteLine("ImageDatabase version \"" __DATE__ " " __TIME__ "\" Copyright (c) 2020-2024 iriszero");
+	CuConsole::WriteLine("ImageDatabase version \"" __DATE__ " " __TIME__ "\" Copyright (c) 2020-2026 iriszero");
 	CuConsole::WriteLine("  built with " BOOST_PLATFORM "/" BOOST_COMPILER);
 	CuConsole::WriteLine("+ tesseract/", tesseract::TessBaseAPI::Version());
-	CuConsole::WriteLine("+ ffmpeg/", LIBAVCODEC_IDENT);
+	CuConsole::WriteLine("+ ffmpeg/", LIBAVCODEC_IDENT "|" LIBAVFORMAT_IDENT "|" LIBAVDEVICE_IDENT "|" LIBAVUTIL_IDENT "|" LIBSWSCALE_IDENT);
 	CuConsole::WriteLine("+ opencv/", CV_VERSION);
 	CuConsole::WriteLine("+ eigen/", EIGEN_WORLD_VERSION, ".", EIGEN_MAJOR_VERSION, ".", EIGEN_MINOR_VERSION);
 	CuConsole::WriteLine("+ libzip/", zip_libzip_version());
 	CuConsole::WriteLine("+ boost/", BOOST_LIB_VERSION);
 	CuConsole::WriteLine("+ nlohmann-json/", NLOHMANN_JSON_VERSION_MAJOR, ".", NLOHMANN_JSON_VERSION_MINOR, ".", NLOHMANN_JSON_VERSION_PATCH);
-	CuConsole::WriteLine("+ ZXing/", ZXing::ZXING_VERSION_STR);
+	CuConsole::WriteLine("+ ZXing/", ZXING_VERSION_STR);
 	CuConsole::WriteLine("+ GraphicsMagick/", MagickLibVersionText);
+	CuConsole::WriteLine("+ cpphttplib/", CPPHTTPLIB_VERSION);
+#ifdef CU_IMG_HAS_DIRECTXTEX
 	CuConsole::WriteLine("+ DirectXTex/", DIRECTX_TEX_VERSION);
+#endif
+#ifdef ID_ENABLE_RAPID_OCR_NCNN
+	CuConsole::WriteLine("+ RapidOcrNcnn/" VERSION);
+#endif
 
 	namespace Id = ImageDatabase;
 
@@ -51,7 +63,7 @@ int main(const int argc, const char* argv[])
 		});
 	CuArgs::Argument<ImageDatabase::Regex> ignoresArg("--ignore", "ignore", [](const auto& x) { return Id::Regex(x); }, [](const auto& x) { return x.RawString; });
 	CuArgs::Argument decoderArg("--decoder", "decoder " + CuStr::Views::Join(CuEnum::Strings<Id::Decoder>(), "|"), 0x0111);
-	CuArgs::EnumArgument deviceArg("--device", "device", ImageDatabase::Device::opencl);
+	CuArgs::EnumArgument deviceArg("--device", "device", ImageDatabase::Device::vulkan);
 	CuArgs::Argument<uint32_t> threadArg("-t", "thread", 1);
 	CuArgs::Argument<std::vector<std::u8string>> zipExtsArg(
 		"-z",
@@ -135,26 +147,9 @@ int main(const int argc, const char* argv[])
 				| std::views::join_with(';')
 				| std::ranges::to<std::string>();
 		});
-	CuArgs::Argument<std::vector<bool>> useBufferArg(
-		"--use-buffer",
-		"use buffer",
-		[](const auto& v)
-		{
-			return v
-				| std::views::split(';')
-				| std::views::transform([](const auto& x) { return std::string(x.begin(), x.end()) == "true"; })
-				| std::ranges::to<std::vector<bool>>();
-		},
-		[](const auto& v)
-		{
-			return v
-				| std::views::transform([](const auto& x) -> std::string { return x ? "true" : "false"; })
-				| std::views::join_with(';')
-				| std::ranges::to<std::string>();
-		});
-	args.Add(datasetsArg, typesArg, useBufferArg);
+	args.Add(datasetsArg, typesArg);
 
-//#define NO_CATCH
+#define NO_CATCH
 #ifndef NO_CATCH
 	try
 #endif
@@ -169,18 +164,18 @@ int main(const int argc, const char* argv[])
 
 		const auto datasets = args.Value(datasetsArg);
 		auto types = args.Get(typesArg);
-		auto useBuffer = args.Get(useBufferArg);
 
 		if (!types) {
-			types = std::vector<ImageDatabase::DatasetType>(datasets.size(), ImageDatabase::DatasetType::JsonLines);
+			types = std::vector(datasets.size(), ImageDatabase::DatasetType::Binary);
 		}
 
-		if (!useBuffer) {
-			useBuffer = std::vector<bool>(datasets.size(), false);
-		}
+		CuAssert(datasets.size() == types->size());
 
-		CuAssert(datasets.size() == types.size());
-		CuAssert(datasets.size() == useBuffer.size());
+		std::vector<std::pair<std::filesystem::path, ImageDatabase::DatasetType>> datasetFiles{};
+		for (size_t i = 0; i < datasets.size(); ++i)
+		{
+			datasetFiles.emplace_back(datasets[i], (*types)[i]);
+		}
 
 		switch (args.Value(operatorArg))
 		{
@@ -194,9 +189,7 @@ int main(const int argc, const char* argv[])
 				args.Value(zipExtsArg),
 				args.Value(extDecoderArg),
 				args.Value(langArg),
-				datasets,
-				types,
-				useBuffer
+				datasetFiles
 			});
 			break;
 		case ImageDatabase::Operator::Query:
